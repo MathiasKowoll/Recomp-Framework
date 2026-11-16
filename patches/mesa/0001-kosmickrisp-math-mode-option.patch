@@ -1,0 +1,61 @@
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index 2334342..6f787b3 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -21,6 +21,29 @@
+ #include "kosmickrisp/bridge/vk_to_mtl_map.h"
+ #include "kosmickrisp/compiler/nir_to_msl.h"
+ 
++/* Recomp-Framework: the Metal math mode for compiled shaders. MESA_KK_MATH_MODE=fast|relaxed|safe sets it for all
++ * stages (default fast) and MESA_KK_VS_MATH_MODE for vertex shaders only. Games written for desktop drivers can
++ * rely on IEEE infinities (x / 0 = inf, saturate(inf) = 1), which fast math assumes never happen: id Tech 6's
++ * particle vertex shaders divide by zero for every particle with the default fade and lose the whole vertex. */
++static enum mtl_math_mode
++kk_parse_math_mode(const char *e, enum mtl_math_mode def)
++{
++   return e && !strcmp(e, "safe")      ? MTL_MATH_MODE_SAFE
++          : e && !strcmp(e, "relaxed") ? MTL_MATH_MODE_RELAXED
++          : e && !strcmp(e, "fast")    ? MTL_MATH_MODE_FAST
++                                       : def;
++}
++static enum mtl_math_mode
++kk_shader_math_mode(bool vertex)
++{
++   static int mode = -1, vs_mode = -1;
++   if (mode < 0) {
++      mode = kk_parse_math_mode(getenv("MESA_KK_MATH_MODE"), MTL_MATH_MODE_FAST);
++      vs_mode = kk_parse_math_mode(getenv("MESA_KK_VS_MATH_MODE"), (enum mtl_math_mode)mode);
++   }
++   return (enum mtl_math_mode)(vertex ? vs_mode : mode);
++}
++
+ #include "nir_builder.h"
+ #include "nir_lower_blend.h"
+ 
+@@ -1289,7 +1312,7 @@ kk_compile_compute_pipeline(struct kk_device *device,
+ 
+    mtl_library *library = mtl_new_library(
+       device->mtl_compiler_handle, data->code, pdev->info.msl_version,
+-      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
++      kk_shader_math_mode(false), MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+    if (library == NULL)
+       return VK_ERROR_INVALID_SHADER_NV;
+ 
+@@ -1562,7 +1585,7 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+    const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
+    mtl_library *vertex_library = mtl_new_library(
+       device->mtl_compiler_handle, vs_data->code, pdev->info.msl_version,
+-      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
++      kk_shader_math_mode(true), MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+    if (vertex_library == NULL)
+       return VK_ERROR_INVALID_SHADER_NV;
+ 
+@@ -1573,7 +1596,7 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+    const struct msl_compile_data *fs_data = &vs->msl_data[MESA_SHADER_FRAGMENT];
+    mtl_library *fragment_library = mtl_new_library(
+       device->mtl_compiler_handle, fs_data->code, pdev->info.msl_version,
+-      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
++      kk_shader_math_mode(false), MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+    if (fragment_library == NULL) {
+       result = VK_ERROR_INVALID_SHADER_NV;
+       goto destroy_vertex;

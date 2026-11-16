@@ -1,0 +1,3 @@
+# Guest instructions replaced by C: "address C code" per line, using C.<register> names.
+# Example: make an instruction load a different constant
+# 140001234 C.rbx = 0x140567890ull;

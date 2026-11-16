@@ -1,0 +1,12 @@
+# never commit translated game code, game files or build output
+gen*/
+build/
+external/
+orig*.exe
+orig*.bin
+orig*.dll
+*.o
+*.a
+.DS_Store
+__pycache__/
+.venv/

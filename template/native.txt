@@ -1,0 +1,4 @@
+# Guest functions replaced by native C (runtime/native.c or your own files): "address name" per line.
+# The translated original is kept, and RT_NATIVE_OFF=all (or a list of addresses) switches back to it.
+# Example (the MSVC CRT's memmove, if found at this address):
+# 140001000 N_memmove

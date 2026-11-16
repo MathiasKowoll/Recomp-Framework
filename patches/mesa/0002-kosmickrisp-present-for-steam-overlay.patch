@@ -1,0 +1,240 @@
+diff --git a/src/kosmickrisp/bridge/mtl_bridge.h b/src/kosmickrisp/bridge/mtl_bridge.h
+index 2e5f83e..1d77501 100644
+--- a/src/kosmickrisp/bridge/mtl_bridge.h
++++ b/src/kosmickrisp/bridge/mtl_bridge.h
+@@ -37,6 +37,11 @@
+ #include "mtl_texture.h"
+ 
+ mtl_texture *mtl_drawable_get_texture(void *drawable_ptr);
++/* MESA_KK_LEGACY_PRESENT: the texture the final blit renders into instead of the drawable's (see
++ * mtl_command_queue_signal_drawable), and the drawable's link to it for the WSI present. */
++mtl_texture *mtl_new_texture_like_drawable(mtl_device *dev, void *drawable_ptr);
++bool mtl_texture_matches_drawable(mtl_texture *tex, void *drawable_ptr);
++void mtl_drawable_set_present_source(void *drawable_ptr, mtl_texture *tex);
+ 
+ void *mtl_retain(void *handle);
+ void mtl_release(void *handle);
+diff --git a/src/kosmickrisp/bridge/mtl_bridge.m b/src/kosmickrisp/bridge/mtl_bridge.m
+index a5ef514..b30e4fe 100644
+--- a/src/kosmickrisp/bridge/mtl_bridge.m
++++ b/src/kosmickrisp/bridge/mtl_bridge.m
+@@ -4,6 +4,9 @@
+  * SPDX-License-Identifier: MIT
+  */
+ 
++#include <objc/runtime.h>
++#import <Metal/Metal.h>
++#import <QuartzCore/CAMetalLayer.h>
+ #include "mtl_bridge.h"
+ 
+ // kk_image_layout.h should also includes "vulkan/vulkan.h", but just to be safe
+@@ -31,6 +34,34 @@
+    }
+ }
+ 
++mtl_texture *
++mtl_new_texture_like_drawable(mtl_device *dev, void *drawable_ptr)
++{
++   @autoreleasepool {
++      id<MTLTexture> t = ((id<CAMetalDrawable>)drawable_ptr).texture;
++      MTLTextureDescriptor *d =
++         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.pixelFormat width:t.width height:t.height
++                                                        mipmapped:NO];
++      d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
++      d.storageMode = MTLStorageModePrivate;
++      return [(id<MTLDevice>)dev newTextureWithDescriptor:d];
++   }
++}
++
++bool
++mtl_texture_matches_drawable(mtl_texture *tex, void *drawable_ptr)
++{
++   id<MTLTexture> a = (id<MTLTexture>)tex, b = ((id<CAMetalDrawable>)drawable_ptr).texture;
++   return a.width == b.width && a.height == b.height && a.pixelFormat == b.pixelFormat;
++}
++
++void
++mtl_drawable_set_present_source(void *drawable_ptr, mtl_texture *tex)
++{
++   objc_setAssociatedObject((id)drawable_ptr, sel_registerName("mesaPresentSource"), (id)tex,
++                            OBJC_ASSOCIATION_RETAIN);
++}
++
+ void *
+ mtl_retain(void *handle)
+ {
+diff --git a/src/kosmickrisp/bridge/mtl_command_queue.m b/src/kosmickrisp/bridge/mtl_command_queue.m
+index c8ed5bb..a88254c 100644
+--- a/src/kosmickrisp/bridge/mtl_command_queue.m
++++ b/src/kosmickrisp/bridge/mtl_command_queue.m
+@@ -8,6 +8,9 @@
+ 
+ #include <Metal/MTLDevice.h>
+ #include <Metal/MTLCommandQueue.h>
++#include <Metal/MTLEvent.h>
++#include <objc/runtime.h>
++#include <stdlib.h>
+ 
+ /* MTL4CommitOptions */
+ mtl_commit_options *
+@@ -115,6 +118,8 @@
+    @autoreleasepool {
+       id<MTL4CommandQueue> q = (id<MTL4CommandQueue>)queue;
+       id<MTLDrawable> d = (id<MTLDrawable>)drawable;
++      if (getenv("MESA_KK_LEGACY_PRESENT"))
++         return;   /* the queue doesn't write the drawable in this mode */
+       [q waitForDrawable:d];
+    }
+ }
+@@ -125,6 +130,25 @@
+    @autoreleasepool {
+       id<MTL4CommandQueue> q = (id<MTL4CommandQueue>)queue;
+       id<MTLDrawable> d = (id<MTLDrawable>)drawable;
+-      [q signalDrawable:d];
++      if (!getenv("MESA_KK_LEGACY_PRESENT"))
++         [q signalDrawable:d];
++      /* MESA_KK_LEGACY_PRESENT: tools that draw over the game by hooking -[MTLCommandBuffer presentDrawable:]
++       * (the Steam overlay) never see Metal 4 presents, and the overlay can swap in a drawable texture this queue
++       * can't write (it isn't in the residency set). In this mode the queue renders the final blit into a
++       * texture of its own (kk_bind_drawable_to_vkimage) and records an event that fires when that is done;
++       * the WSI then copies it into the drawable and presents through a Metal 3 command buffer. */
++      if (getenv("MESA_KK_LEGACY_PRESENT")) {
++         static id<MTLSharedEvent> event;
++         static uint64_t value;
++         uint64_t v;
++         @synchronized ([MTLSharedEventListener class]) {
++            if (!event)
++               event = [q.device newSharedEvent];
++            v = ++value;
++         }
++         [q signalEvent:event value:v];
++         objc_setAssociatedObject(d, sel_registerName("mesaPresentEvent"), @[ event, @(v) ],
++                                  OBJC_ASSOCIATION_RETAIN);
++      }
+    }
+ }
+diff --git a/src/kosmickrisp/vulkan/kk_image.c b/src/kosmickrisp/vulkan/kk_image.c
+index dd4ad75..5b59fdb 100644
+--- a/src/kosmickrisp/vulkan/kk_image.c
++++ b/src/kosmickrisp/vulkan/kk_image.c
+@@ -647,6 +647,11 @@ kk_image_finish(struct kk_device *dev, struct kk_image *image,
+                             pAllocator);
+    }
+ 
++   if (image->legacy_present_tex) {
++      kk_device_remove_buffer_from_residency_set(dev, image->legacy_present_tex);
++      mtl_release(image->legacy_present_tex);
++      image->legacy_present_tex = NULL;
++   }
+    vk_image_finish(&image->vk);
+ }
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_image.h b/src/kosmickrisp/vulkan/kk_image.h
+index 40e75a2..deb332f 100644
+--- a/src/kosmickrisp/vulkan/kk_image.h
++++ b/src/kosmickrisp/vulkan/kk_image.h
+@@ -55,6 +55,9 @@ struct kk_image {
+ 
+    uint8_t plane_count;
+    struct kk_image_plane planes[3];
++
++   /* MESA_KK_LEGACY_PRESENT: swapchain blit target used instead of the drawable's texture */
++   mtl_texture *legacy_present_tex;
+ };
+ 
+ #define kk_foreach_slice(ndx, image, subresource_member)                       \
+diff --git a/src/kosmickrisp/vulkan/kk_wsi.c b/src/kosmickrisp/vulkan/kk_wsi.c
+index d863766..492931c 100644
+--- a/src/kosmickrisp/vulkan/kk_wsi.c
++++ b/src/kosmickrisp/vulkan/kk_wsi.c
+@@ -54,6 +54,21 @@ kk_bind_drawable_to_vkimage(VkImage vk_image, void *drawable)
+    VK_FROM_HANDLE(kk_image, image, vk_image);
+    mtl_texture *texture = mtl_drawable_get_texture(drawable);
+ 
++   if (getenv("MESA_KK_LEGACY_PRESENT")) {   /* see mtl_command_queue_signal_drawable */
++      struct kk_device *dev = container_of(image->vk.base.device, struct kk_device, vk);
++      if (!image->legacy_present_tex ||
++          !mtl_texture_matches_drawable(image->legacy_present_tex, drawable)) {
++         if (image->legacy_present_tex) {
++            kk_device_remove_buffer_from_residency_set(dev, image->legacy_present_tex);
++            mtl_release(image->legacy_present_tex);
++         }
++         image->legacy_present_tex = mtl_new_texture_like_drawable(dev->mtl_handle, drawable);
++         kk_device_add_buffer_to_residency_set(dev, image->legacy_present_tex);
++      }
++      texture = image->legacy_present_tex;
++      mtl_drawable_set_present_source(drawable, texture);
++   }
++
+    /* This should only be called for swapchain binding. */
+    assert(image->plane_count == 1);
+    struct kk_image_plane *plane = &image->planes[0];
+diff --git a/src/vulkan/wsi/wsi_common_metal.c b/src/vulkan/wsi/wsi_common_metal.c
+index b1e3f2e..694d052 100644
+--- a/src/vulkan/wsi/wsi_common_metal.c
++++ b/src/vulkan/wsi/wsi_common_metal.c
+@@ -4,6 +4,7 @@
+  * SPDX-License-Identifier: MIT
+  */
+ 
++#include <stdlib.h>
+ #include "vk_instance.h"
+ #include "vk_physical_device.h"
+ #include "vk_util.h"
+@@ -900,7 +901,9 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+     * set the framebuffer only usage.
+     */
+    const bool layer_opaque = opaque_composition && wsi_device->sw;
+-   const bool framebuffer_only = !wsi_device->sw;
++   /* MESA_KK_LEGACY_PRESENT copies the frame into the drawable with a blit, which framebuffer-only drawables
++    * don't allow */
++   const bool framebuffer_only = !wsi_device->sw && !getenv("MESA_KK_LEGACY_PRESENT");
+ 
+    VkResult result = wsi_metal_layer_configure(metal_surface->pLayer,
+       pCreateInfo->imageExtent.width, pCreateInfo->imageExtent.height,
+diff --git a/src/vulkan/wsi/wsi_common_metal_layer.m b/src/vulkan/wsi/wsi_common_metal_layer.m
+index 6308d70..8192497 100644
+--- a/src/vulkan/wsi/wsi_common_metal_layer.m
++++ b/src/vulkan/wsi/wsi_common_metal_layer.m
+@@ -8,6 +8,9 @@
+ 
+ #include "vk_format.h"
+ 
++#include <objc/runtime.h>
++#include <stdio.h>
++#include <stdlib.h>
+ #import <QuartzCore/CAMetalLayer.h>
+ #import <Metal/Metal.h>
+ 
+@@ -363,7 +366,30 @@
+ {
+    @autoreleasepool {
+       id<CAMetalDrawable> drawable = [(id<CAMetalDrawable>)*drawable_ptr autorelease];
+-      [drawable present];
++      /* set by the driver under MESA_KK_LEGACY_PRESENT: after the driver's rendering is done, copy its frame
++       * into the drawable and present through a Metal 3 command buffer, so presentDrawable: hooks (the Steam
++       * overlay) can draw */
++      NSArray *ev = objc_getAssociatedObject(drawable, sel_registerName("mesaPresentEvent"));
++      if (ev) {
++         id<MTLSharedEvent> event = ev[0];
++         static id<MTLCommandQueue> queue;
++         @synchronized ([MTLSharedEventListener class]) {
++            if (!queue)   /* (the event's device is nil when a Metal 4 queue signals it) */
++               queue = [drawable.texture.device newCommandQueue];
++         }
++         id<MTLCommandBuffer> cb = [queue commandBuffer];
++         [cb encodeWaitForEvent:event value:[ev[1] unsignedLongLongValue]];
++         id<MTLTexture> src = objc_getAssociatedObject(drawable, sel_registerName("mesaPresentSource"));
++         if (src) {   /* the driver rendered the frame into its own texture: copy it into the drawable */
++            id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
++            [blit copyFromTexture:src toTexture:drawable.texture];
++            [blit endEncoding];
++         }
++         [cb presentDrawable:drawable];
++         [cb commit];
++      } else {
++         [drawable present];
++      }
+ 
+       *drawable_ptr = nil;
+    }

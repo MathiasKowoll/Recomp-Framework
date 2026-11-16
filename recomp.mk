@@ -1,0 +1,166 @@
+# Recomp-Framework build rules. A game project's Makefile sets a few variables and includes this file:
+#
+#   FW        = path/to/Recomp-Framework
+#   GAME_EXE  = orig.exe                  # the game's Windows executable (a symlink to the user's copy)
+#   APP_NAME  = MyGame                    # the .app name
+#   BUNDLE_ID = com.example.mygame-recomp
+#   GAME_SRC  = game.c                    # game.c (the RtGame settings) plus any game-specific runtime code
+#   NATIVE    = native.txt                # optional: guest functions replaced by native ones (addr name)
+#   PATCHES   = patches.txt               # optional: guest instructions replaced by C (addr code)
+#   include $(FW)/recomp.mk
+#
+# Targets: gen (translate the exe), boot (link the runtime + translated game), runtime (compile check of the
+# runtime alone), app (the .app bundle),
+# kosmickrisp (build the Vulkan driver from Mesa), fuzz (differential instruction test), clean.
+# Extra translated DLLs: see MODULE_RULES at the end.
+
+CC        ?= clang
+PYTHON    ?= python3
+ARCH      ?= -arch arm64
+MACOS_MIN ?= 26.0
+GEN_DIR   ?= gen
+BUILD     ?= build
+APP_NAME  ?= Game
+BUNDLE_ID ?= com.example.game-recomp
+APP_CATEGORY ?= public.app-category.games
+GAME_SRC  ?= game.c
+NATIVE    ?=
+PATCHES   ?=
+EXTRA_LIBS ?=
+EXTRA_LIBS_FORCE ?=
+
+FW_INC     = -I$(FW)/runtime -I$(FW)/third_party/vulkan/include
+WARN       = -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-label
+CFLAGS    ?= -O1 -g $(ARCH) -mmacosx-version-min=$(MACOS_MIN) $(WARN) $(FW_INC)
+# translated code: -O2 so clang's loop vectorizer turns per-lane XMM loops back into NEON
+GEN_CFLAGS ?= -O2 -g $(ARCH) -mmacosx-version-min=$(MACOS_MIN) $(WARN) -I$(FW)/runtime
+
+# ---- profile-guided optimization ----
+#   make app PGO=gen BUILD=build-pgo   instrumented build; play it (each run writes $(PGO_DIR)/*.profraw on exit)
+#   make pgo-merge                     merge the runs into $(PGO_DATA)
+#   make app PGO=use                   optimized build using the profile
+PGO      ?=
+PGO_DIR  ?= $(CURDIR)/pgo
+PGO_DATA ?= $(PGO_DIR)/game.profdata
+PGO_LDFLAGS =
+ifeq ($(PGO),gen)
+GEN_CFLAGS  += -fprofile-instr-generate
+CFLAGS      += -fprofile-instr-generate
+PGO_LDFLAGS  = -fprofile-instr-generate
+endif
+ifeq ($(PGO),use)
+GEN_CFLAGS += -fprofile-instr-use=$(PGO_DATA) -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled
+CFLAGS     += -fprofile-instr-use=$(PGO_DATA) -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled
+endif
+pgo-merge:
+	xcrun llvm-profdata merge -o "$(PGO_DATA)" "$(PGO_DIR)"/*.profraw
+
+TRANSLATE = $(PYTHON) $(FW)/tools/recomp64.py
+TRANSLATE_OPTS = $(if $(NATIVE),--native $(NATIVE)) $(if $(PATCHES),--patches $(PATCHES))
+
+# ---- translation of the game executable ----
+gen:
+	$(TRANSLATE) $(GAME_EXE) $(GEN_DIR) $(TRANSLATE_OPTS)
+
+GEN_SRC = $(sort $(wildcard $(GEN_DIR)/code_*.c)) $(GEN_DIR)/tables.c
+GEN_OBJ = $(patsubst %.c,$(BUILD)/%.o,$(GEN_SRC))
+$(BUILD)/$(GEN_DIR)/%.o: $(GEN_DIR)/%.c $(FW)/runtime/cpu.h $(FW)/runtime/tables.h
+	@mkdir -p $(dir $@)
+	$(CC) $(GEN_CFLAGS) -c $< -o $@
+$(BUILD)/libgame.a: $(GEN_OBJ)
+	rm -f $@; ar rcs $@ $^
+
+# ---- runtime ----
+FW_RT_C = rt.c teb.c kernel32.c handles.c files.c vulkan.c display.c window.c bcrypt.c input.c xaudio2.c pdh.c \
+          system.c dinput.c sockets.c wasapi.c fiber.c user32.c steam.c native.c spvfix.c
+FW_RT_M = cocoa.m winhttp.m gamepad.m gpucapture.m
+RT_OBJ  = $(patsubst %.c,$(BUILD)/fw/%.o,$(FW_RT_C)) $(patsubst %.m,$(BUILD)/fw/%.o,$(FW_RT_M))
+GAME_OBJ = $(patsubst %.c,$(BUILD)/game/%.o,$(GAME_SRC))
+FW_HDR  = $(wildcard $(FW)/runtime/*.h)
+
+$(BUILD)/fw/%.o: $(FW)/runtime/%.c $(FW_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD)/fw/%.o: $(FW)/runtime/%.m $(FW_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -fobjc-arc -c $< -o $@
+$(BUILD)/game/%.o: %.c $(FW_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# The guest image range is reserved inside the executable as zero-fill segments (rt.c): the exe at its
+# preferred base 0x140000000, translated DLLs at 0x180000000.
+LDFLAGS ?= $(ARCH) -Wl,-export_dynamic -Wl,-segaddr,__GUEST,0x140000000 -Wl,-segaddr,__GUESTDLL,0x180000000 \
+           -framework CoreGraphics -framework CoreFoundation -framework AppKit -framework QuartzCore \
+           -framework AudioToolbox -framework CoreAudio -framework GameController -framework CoreHaptics -framework Metal
+
+$(BUILD)/boot: $(BUILD)/libgame.a $(EXTRA_LIBS) $(EXTRA_LIBS_FORCE) $(RT_OBJ) $(GAME_OBJ) $(BUILD)/fw/boot.o $(FW)/runtime/boot-Info.plist
+	$(CC) $(LDFLAGS) $(PGO_LDFLAGS) -Wl,-sectcreate,__TEXT,__info_plist,$(FW)/runtime/boot-Info.plist $(BUILD)/fw/boot.o $(RT_OBJ) $(GAME_OBJ) \
+	    $(BUILD)/libgame.a $(EXTRA_LIBS) $(foreach l,$(EXTRA_LIBS_FORCE),-Wl,-force_load,$(l)) -o $@
+boot: $(BUILD)/boot
+# the runtime alone (no translated game): a quick compile check
+runtime: $(RT_OBJ) $(GAME_OBJ) $(BUILD)/fw/boot.o
+
+# ---- macOS app ----
+app: $(BUILD)/boot
+	$(PYTHON) $(FW)/tools/make_app.py $(BUILD)/boot $(GAME_EXE) $(BUILD)/$(APP_NAME).app --name "$(APP_NAME)" \
+	    --bundle-id $(BUNDLE_ID) --category $(APP_CATEGORY)
+
+# ---- Vulkan thunks (generated from the Vulkan headers) ----
+$(FW)/runtime/vk_thunks.h: $(FW)/tools/gen_vk.py $(FW)/third_party/vulkan/include/vulkan/vulkan_core.h
+	$(PYTHON) $(FW)/tools/gen_vk.py $(FW)/third_party/vulkan/include/vulkan/vulkan_core.h $@
+$(BUILD)/fw/vulkan.o: $(FW)/runtime/vk_thunks.h
+
+# ---- instruction fuzzer: every instruction form the exe uses, translated vs. original x86 (under Rosetta) ----
+fuzz:
+	$(PYTHON) $(FW)/tests/insn_fuzz.py $(GAME_EXE) --trials 96
+
+# ---- KosmicKrisp (Mesa's Vulkan driver for Metal), built from source with the framework's patches ----
+# Needs: brew install llvm libclc spirv-llvm-translator; the Vulkan SDK in /usr/local (static SPIRV-Tools).
+MESA_DIR ?= external/mesa
+MESA_REF ?= main
+KK_STAGE = $(BUILD)/kosmickrisp
+kosmickrisp:
+	@test -d $(MESA_DIR) || git clone --depth 1 --branch $(MESA_REF) https://gitlab.freedesktop.org/mesa/mesa.git $(MESA_DIR)
+	@test -x external/mesa-venv/bin/python || { /opt/homebrew/bin/python3 -m venv external/mesa-venv && external/mesa-venv/bin/pip install -q mako packaging pyyaml; }
+	@test -d $(MESA_DIR)/build || PATH="/opt/homebrew/opt/llvm/bin:$(CURDIR)/external/mesa-venv/bin:$$PATH" meson setup $(MESA_DIR)/build $(MESA_DIR) \
+	    --prefix=$(CURDIR)/external/kk-install --buildtype=release -Db_ndebug=true -Dplatforms=macos -Dvulkan-drivers=kosmickrisp \
+	    -Dgallium-drivers= -Dopengl=false -Dzstd=disabled --prefer-static --pkg-config-path=/usr/local/lib/pkgconfig
+	@for p in $(abspath $(FW))/patches/mesa/*.patch; do \
+	    git -C $(MESA_DIR) apply --reverse --check "$$p" 2>/dev/null && continue; \
+	    git -C $(MESA_DIR) apply "$$p" && echo "applied $$(basename $$p)" || exit 1; \
+	done
+	PATH="/opt/homebrew/opt/llvm/bin:$(CURDIR)/external/mesa-venv/bin:$$PATH" ninja -C $(MESA_DIR)/build install
+	rm -rf $(KK_STAGE) && mkdir -p $(KK_STAGE)/drirc.d
+	cp external/kk-install/lib/libvulkan_kosmickrisp.dylib $(KK_STAGE)/
+	cp /usr/local/lib/libvulkan.1.dylib $(KK_STAGE)/
+	printf '{\n    "file_format_version": "1.0.1",\n    "ICD": { "library_path": "./libvulkan_kosmickrisp.dylib", "api_version": "1.4.0" }\n}\n' > $(KK_STAGE)/kosmickrisp_icd.json
+	cp $(MESA_DIR)/src/util/00-mesa-defaults.conf $(MESA_DIR)/src/kosmickrisp/vulkan/00-kk-defaults.conf $(KK_STAGE)/drirc.d/
+	git -C $(MESA_DIR) log -1 --format='mesa %H (%cd)' > $(KK_STAGE)/VERSION
+	cp $(MESA_DIR)/docs/license.rst $(KK_STAGE)/LICENSE-mesa.rst
+	printf 'libvulkan_kosmickrisp.dylib: KosmicKrisp from Mesa (https://mesa3d.org), MIT license, see LICENSE-mesa.rst.\nlibvulkan.1.dylib: the Khronos Vulkan loader (https://github.com/KhronosGroup/Vulkan-Loader), Apache-2.0 license.\n' > $(KK_STAGE)/THIRD_PARTY.txt
+	@cat $(KK_STAGE)/VERSION
+
+clean:
+	rm -rf $(BUILD)
+
+.PHONY: gen boot runtime app fuzz kosmickrisp clean pgo-merge
+
+# ---- extra translated DLLs (game DLLs that contain code) ----
+# $(call MODULE_RULES,name,dll,dir,extra translator options,extra cflags) defines `gen-<name>` and
+# $(BUILD)/lib<name>.a; add the library to EXTRA_LIBS_FORCE. A DLL whose preferred base collides with another
+# one is translated rebased (--rebase <hex>). Example:
+#   $(eval $(call MODULE_RULES,bink2w64,orig_bink.dll,gen_bink,--rebase 182000000 --no-abi-trim,-DRT_TSO=0))
+#   EXTRA_LIBS_FORCE += $(BUILD)/libbink2w64.a
+define MODULE_RULES
+gen-$(1):
+	$$(TRANSLATE) $(2) $(3) --module $(1) $(4)
+$(1)_SRC = $$(sort $$(wildcard $(3)/code_*.c)) $(3)/tables.c
+$(1)_OBJ = $$(patsubst %.c,$$(BUILD)/%.o,$$($(1)_SRC))
+$$(BUILD)/$(3)/%.o: $(3)/%.c $$(FW)/runtime/cpu.h $$(FW)/runtime/tables.h
+	@mkdir -p $$(dir $$@)
+	$$(CC) $$(GEN_CFLAGS) $(5) -c $$< -o $$@
+$$(BUILD)/lib$(1).a: $$($(1)_OBJ)
+	rm -f $$@; ar rcs $$@ $$^
+.PHONY: gen-$(1)
+endef
