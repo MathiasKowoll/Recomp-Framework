@@ -19,6 +19,10 @@ typedef struct {
     const char *cloud_prefix;      // name prefix of the synced files in the game's cloud space, e.g. "mygame-recomp/"
     const char *computer_name;     // what GetComputerName reports
     const char *pick_folder_msg;   // message of the folder picker when the game isn't found
+    const char *image;             // optional: the executable image to load, from the app's Resources when it is
+                                   // there (e.g. a DRM-free copy of the exe made at build time); else <game folder>/<exe>
+    const char *gl_extensions;     // OpenGL games: extra names for GL_EXTENSIONS, space-separated (e.g. an extension
+                                   // the engine checks before loading entry points that the core profile has anyway)
 } RtGame;
 
 extern const RtGame rt_game;

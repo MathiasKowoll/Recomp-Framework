@@ -404,15 +404,26 @@ void I_kernel32_dll_MultiByteToWideChar(CPU *c) {
 }
 // WideCharToMultiByte(cp, flags, src, srclen, dst, dstlen, default, used)
 void I_kernel32_dll_WideCharToMultiByte(CPU *c) {
+    // encoded by length, not as a C string: an explicit srclen may include NULs (the CRT converts its whole
+    // environment block, "a=b\0c=d\0\0", in one call, and an empty block is a single NUL)
     const uint16_t *s = PTR(A2); int sl = (int)A3; uint64_t dst = AN(4); int dl = (int)AN(5);
-    size_t n = sl < 0 ? w16len(s) : (size_t)sl;
-    uint16_t *tmp = malloc((n + 1) * 2); memcpy(tmp, s, n * 2); tmp[n] = 0;
-    char *u = w16_to_utf8(tmp);
-    size_t un = strlen(u) + (sl < 0 ? 1 : 0);
-    if (dl) { size_t m = un < (size_t)dl ? un : (size_t)dl; memcpy(PTR(dst), u, m); }
+    size_t n = sl < 0 ? w16len(s) + 1 : (size_t)sl;
+    char *u = malloc(n * 3 + 1); size_t un = 0;
+    for (size_t i = 0; i < n; i++) {
+        uint32_t ch = s[i];
+        if (ch >= 0xD800 && ch < 0xDC00 && i + 1 < n && s[i + 1] >= 0xDC00 && s[i + 1] < 0xE000)
+            ch = 0x10000 + ((ch - 0xD800) << 10) + (s[++i] - 0xDC00);
+        else if (ch >= 0xD800 && ch < 0xE000) ch = 0xFFFD;
+        if (ch < 0x80) u[un++] = (char)ch;
+        else if (ch < 0x800) { u[un++] = (char)(0xC0 | ch >> 6); u[un++] = (char)(0x80 | (ch & 63)); }
+        else if (ch < 0x10000) { u[un++] = (char)(0xE0 | ch >> 12); u[un++] = (char)(0x80 | (ch >> 6 & 63)); u[un++] = (char)(0x80 | (ch & 63)); }
+        else { u[un++] = (char)(0xF0 | ch >> 18); u[un++] = (char)(0x80 | (ch >> 12 & 63)); u[un++] = (char)(0x80 | (ch >> 6 & 63)); u[un++] = (char)(0x80 | (ch & 63)); }
+    }
     if (AN(7)) wr32(AN(7), 0);
-    free(tmp); free(u);
-    RET(dl && (size_t)dl < un ? 0 : un);
+    if (dl && (size_t)dl < un) { free(u); set_last_error(122); RET(0); return; }   // ERROR_INSUFFICIENT_BUFFER
+    if (dl) memcpy(PTR(dst), u, un);
+    free(u);
+    RET(un);
 }
 void I_kernel32_dll_GetStringTypeW(CPU *c) {
     const uint16_t *s = PTR(A1); int n = (int)A2; uint64_t out = A3;
@@ -443,6 +454,92 @@ static void lcmap(CPU *c, uint32_t flags, const uint16_t *s, int sl, uint64_t ds
     RET(sl);
 }
 void I_kernel32_dll_LCMapStringW(CPU *c) { lcmap(c, (uint32_t)A1, PTR(A2), (int)A3, AN(4), (int)AN(5)); }
+
+// HeapWalk(heap, entry): heaps are malloc underneath and cannot be enumerated: no more entries
+void I_kernel32_dll_HeapWalk(CPU *c) { set_last_error(259); RET(0); }   // ERROR_NO_MORE_ITEMS
+
+// RtlPcToFileHeader(pc, *base): the image containing pc. MSVC's x64 C++ throw uses it, since the throw info is
+// image-relative; a 0 base makes every catch miss.
+void I_kernel32_dll_RtlPcToFileHeader(CPU *c) {
+    uint64_t pc = A0, base = 0;
+    if (pc >= gimage_base && pc < gimage_base + gimage_size) base = gimage_base;
+    else { const GModule *m = rt_module_at(pc); if (m) base = m->base; }
+    if (A1) wr64(A1, base);
+    RET(base);
+}
+
+// ANSI variants (older MSVC CRTs, e.g. VS2010's, initialize through these)
+static const char env_block_a[] = { 0, 0 };
+void I_kernel32_dll_GetEnvironmentStrings(CPU *c) { RET(G(env_block_a)); }
+void I_kernel32_dll_FreeEnvironmentStringsA(CPU *c) { RET(1); }
+void I_kernel32_dll_GetStartupInfoA(CPU *c) { memset(PTR(A0), 0, 104); wr32(A0, 104); }
+void I_kernel32_dll_SetHandleCount(CPU *c) { RET(A0); }
+// GetVersion: build << 16 | minor << 8 | major (high bit clear: NT), matching GetVersionEx
+void I_kernel32_dll_GetVersion(CPU *c) { RET((19045u << 16) | 10u); }
+static uint16_t ctype_of(unsigned ch) {
+    if (ch >= 'A' && ch <= 'Z') return 0x1 | 0x100;
+    if (ch >= 'a' && ch <= 'z') return 0x2 | 0x100;
+    if (ch >= '0' && ch <= '9') return 0x4 | 0x80;   // digit, hex digit
+    if (ch == ' ' || (ch >= 9 && ch <= 13)) return 0x8 | (ch == ' ' ? 0x40 : 0x20);
+    if (ch < 32 || ch == 127) return 0x20;
+    if (ch < 128) return 0x10;
+    return 0x100;
+}
+// GetStringTypeA(lcid, type, src, n, out): CT_CTYPE1 only
+void I_kernel32_dll_GetStringTypeA(CPU *c) {
+    const uint8_t *s = PTR(A2); int n = (int)A3; uint64_t out = AN(4);
+    if (n < 0) n = (int)strlen((const char *)s) + 1;
+    for (int i = 0; i < n; i++) wr16(out + 2 * i, ctype_of(s[i]));
+    RET(1);
+}
+// LCMapStringA(lcid, flags, src, srclen, dst, dstlen): upper/lower case mapping only
+void I_kernel32_dll_LCMapStringA(CPU *c) {
+    uint32_t flags = (uint32_t)A1; const char *s = PTR(A2); int sl = (int)A3; uint64_t dst = AN(4); int dl = (int)AN(5);
+    if (sl < 0) sl = (int)strlen(s) + 1;
+    if (!dl) { RET(sl); return; }
+    for (int i = 0; i < sl && i < dl; i++) {
+        uint8_t ch = (uint8_t)s[i];
+        if ((flags & 0x200) && ch >= 'a' && ch <= 'z') ch -= 32;
+        if ((flags & 0x100) && ch >= 'A' && ch <= 'Z') ch += 32;
+        wr8(dst + i, ch);
+    }
+    RET(sl < dl ? sl : dl);
+}
+// GetLocaleInfoA(lcid, type, buf, n): the few values a CRT asks for, as en-US
+void I_kernel32_dll_GetLocaleInfoA(CPU *c) {
+    uint32_t t = (uint32_t)A1 & 0xFFFF; uint64_t buf = A2; int n = (int)A3;
+    const char *v = "";
+    switch (t) {
+    case 0x0001: v = "0409"; break;      // LOCALE_ILANGUAGE
+    case 0x0004: case 0x1001: v = "English"; break;
+    case 0x0007: case 0x1002: v = "United States"; break;
+    case 0x0059: v = "en"; break;        // LOCALE_SISO639LANGNAME
+    case 0x005A: v = "US"; break;        // LOCALE_SISO3166CTRYNAME
+    case 0x000B: v = "437"; break;       // LOCALE_IDEFAULTCODEPAGE
+    case 0x1004: v = "1252"; break;      // LOCALE_IDEFAULTANSICODEPAGE
+    case 0x000E: v = "."; break;         // LOCALE_SDECIMAL
+    case 0x000F: v = ","; break;         // LOCALE_STHOUSAND
+    case 0x0010: v = "3;0"; break;       // LOCALE_SGROUPING
+    }
+    int len = (int)strlen(v) + 1;
+    if (!n) { RET(len); return; }
+    if (n < len) { set_last_error(122); RET(0); return; }
+    memcpy(PTR(buf), v, (size_t)len);
+    RET(len);
+}
+// CompareStringW(lcid, flags, s1, n1, s2, n2): ordinal, NORM_IGNORECASE (1) folds ASCII; 1/2/3 = less/equal/greater
+void I_kernel32_dll_CompareStringW(CPU *c) {
+    uint32_t fl = (uint32_t)A1; const uint16_t *a = PTR(A2), *b = PTR(AN(4));
+    int na = (int)A3, nb = (int)AN(5);
+    if (na < 0) na = (int)w16len(a);
+    if (nb < 0) nb = (int)w16len(b);
+    for (int i = 0; i < na && i < nb; i++) {
+        unsigned x = a[i], y = b[i];
+        if (fl & 1) { if (x - 'A' < 26u) x += 32; if (y - 'A' < 26u) y += 32; }
+        if (x != y) { RET(x < y ? 1 : 3); return; }
+    }
+    RET(na == nb ? 2 : na < nb ? 1 : 3);
+}
 void I_kernel32_dll_LCMapStringEx(CPU *c) { lcmap(c, (uint32_t)A1, PTR(A2), (int)A3, AN(4), (int)AN(5)); }
 
 // ---------------- module / dynamic loading ----------------

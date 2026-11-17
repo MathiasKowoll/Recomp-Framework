@@ -29,8 +29,11 @@ class PE:
             self.mem[va] = data
         sec = {s.name: s for s in b.sections}
         self.text = sec[".text"]
-        self.text_lo = self.base + self.text.virtual_address
-        self.text_hi = self.text_lo + self.text.virtual_size
+        # every executable section is code (some images link extra code sections, e.g. a math library in
+        # "text" after .data); text_lo/text_hi span them all, code_ranges says which parts really are code
+        self.code_ranges = sorted((va, va + vs) for name, va, vs, fo, fs, ch in self.sections if ch & 0x20000000)
+        self.text_lo = self.code_ranges[0][0]
+        self.text_hi = self.code_ranges[-1][1]
 
         # imports: IAT slot address -> "dll!name" (or "dll!#ordinal")
         self.iat = {}
@@ -123,7 +126,20 @@ class PE:
         return self.seg(addr)[0] is not None
 
     def is_code(self, addr):
-        return self.text_lo <= addr < self.text_hi
+        return any(lo <= addr < hi for lo, hi in self.code_ranges)
+
+    def code_end(self, addr):
+        """End of the executable section containing addr (text_hi if none)."""
+        for lo, hi in self.code_ranges:
+            if lo <= addr < hi: return hi
+        return self.text_hi
+
+    def read_code(self):
+        """Bytes of [text_lo, text_hi), with the code sections filled in and zeros between them."""
+        buf = bytearray(self.text_hi - self.text_lo)
+        for lo, hi in self.code_ranges:
+            buf[lo - self.text_lo:hi - self.text_lo] = self.read(lo, hi - lo)
+        return bytes(buf)
 
     def func_end(self, addr):
         """End of the function region starting at addr: the next known function start."""

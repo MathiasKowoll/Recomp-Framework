@@ -23,8 +23,11 @@ void I_user32_dll_GetSystemMetrics(CPU *c) {
     default: RET(0); break;
     }
 }
-void I_user32_dll_GetDC(CPU *c) { RET(PSEUDO_GDI | 1); }
-void I_user32_dll_GetWindowDC(CPU *c) { RET(PSEUDO_GDI | 1); }
+// A window's DC carries its hwnd (bit 32 set), so SwapBuffers / wglMakeCurrent can find the window (opengl.m)
+#define DC_WINDOW 0x100000000ull
+void I_user32_dll_GetDC(CPU *c) { RET(PSEUDO_GDI | (A0 ? DC_WINDOW | (uint32_t)A0 : 1)); }
+void I_user32_dll_GetWindowDC(CPU *c) { RET(PSEUDO_GDI | (A0 ? DC_WINDOW | (uint32_t)A0 : 1)); }
+uint64_t rt_dc_window(uint64_t dc) { return (dc & ~0xFFFFFFFFull) == (PSEUDO_GDI | DC_WINDOW) ? (uint32_t)dc : 0; }
 void I_user32_dll_ReleaseDC(CPU *c) { RET(1); }
 void I_gdi32_dll_GetDeviceCaps(CPU *c) {
     uint32_t w, h; screen_px(&w, &h);
@@ -46,6 +49,23 @@ void I_user32_dll_LoadIconW(CPU *c) { RET(PSEUDO_GDI | 0x20000 | (A1 & 0xFFFF));
 static uint32_t next_msg = 0xC000;
 void I_user32_dll_RegisterWindowMessageA(CPU *c) { RET(__atomic_fetch_add(&next_msg, 1, __ATOMIC_SEQ_CST)); }
 void I_user32_dll_RegisterWindowMessageW(CPU *c) { RET(__atomic_fetch_add(&next_msg, 1, __ATOMIC_SEQ_CST)); }
+void I_gdi32_dll_CreateSolidBrush(CPU *c) { RET(PSEUDO_GDI | 0x400 | (A0 & 0xFF)); }
+void I_gdi32_dll_CreateFontA(CPU *c) { RET(PSEUDO_GDI | 0x500); }
+void I_gdi32_dll_SetTextColor(CPU *c) { RET(0); }
+void I_gdi32_dll_SetBkColor(CPU *c) { RET(0xFFFFFF); }
+// EnumDisplayDevicesA(device, index, DISPLAY_DEVICEA*, flags): one adapter with one monitor.
+// DISPLAY_DEVICEA: cb +0, DeviceName[32] +4, DeviceString[128] +36, StateFlags +164, DeviceID[128] +168, DeviceKey[128] +296
+void I_user32_dll_EnumDisplayDevicesA(CPU *c) {
+    uint64_t d = A2;
+    if ((uint32_t)A1 != 0 || !d) { RET(0); return; }
+    uint32_t cb = rd32(d); if (cb < 168) { RET(0); return; }
+    memset(PTR(d + 4), 0, cb - 4);
+    const char *name = A0 ? "\\\\.\\DISPLAY1\\Monitor0" : "\\\\.\\DISPLAY1";
+    const char *desc = A0 ? "Built-in Display" : "Apple GPU";
+    strncpy(PTR(d + 4), name, 31); strncpy(PTR(d + 36), desc, 127);
+    wr32(d + 164, A0 ? 0x3 : 0x5);   // monitor: ACTIVE | ATTACHED; adapter: ATTACHED_TO_DESKTOP | PRIMARY_DEVICE
+    RET(1);
+}
 void I_gdi32_dll_GetStockObject(CPU *c) { RET(PSEUDO_GDI | 0x300 | (A0 & 0xFF)); }
 void I_gdi32_dll_DeleteObject(CPU *c) { RET(1); }
 void I_gdi32_dll_DeleteDC(CPU *c) { RET(1); }

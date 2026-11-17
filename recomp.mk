@@ -23,6 +23,7 @@ BUILD     ?= build
 APP_NAME  ?= Game
 BUNDLE_ID ?= com.example.game-recomp
 APP_CATEGORY ?= public.app-category.games
+APP_FLAGS ?=
 GAME_SRC  ?= game.c
 NATIVE    ?=
 PATCHES   ?=
@@ -73,7 +74,7 @@ $(BUILD)/libgame.a: $(GEN_OBJ)
 # ---- runtime ----
 FW_RT_C = rt.c teb.c kernel32.c handles.c files.c vulkan.c display.c window.c bcrypt.c input.c xaudio2.c pdh.c \
           system.c dinput.c sockets.c wasapi.c fiber.c user32.c steam.c native.c spvfix.c
-FW_RT_M = cocoa.m winhttp.m gamepad.m gpucapture.m
+FW_RT_M = cocoa.m winhttp.m gamepad.m gpucapture.m opengl.m
 RT_OBJ  = $(patsubst %.c,$(BUILD)/fw/%.o,$(FW_RT_C)) $(patsubst %.m,$(BUILD)/fw/%.o,$(FW_RT_M))
 GAME_OBJ = $(patsubst %.c,$(BUILD)/game/%.o,$(GAME_SRC))
 FW_HDR  = $(wildcard $(FW)/runtime/*.h)
@@ -92,7 +93,8 @@ $(BUILD)/game/%.o: %.c $(FW_HDR)
 # preferred base 0x140000000, translated DLLs at 0x180000000.
 LDFLAGS ?= $(ARCH) -Wl,-export_dynamic -Wl,-segaddr,__GUEST,0x140000000 -Wl,-segaddr,__GUESTDLL,0x180000000 \
            -framework CoreGraphics -framework CoreFoundation -framework AppKit -framework QuartzCore \
-           -framework AudioToolbox -framework CoreAudio -framework GameController -framework CoreHaptics -framework Metal
+           -framework AudioToolbox -framework CoreAudio -framework GameController -framework CoreHaptics -framework Metal \
+           -framework OpenGL -framework IOSurface
 
 $(BUILD)/boot: $(BUILD)/libgame.a $(EXTRA_LIBS) $(EXTRA_LIBS_FORCE) $(RT_OBJ) $(GAME_OBJ) $(BUILD)/fw/boot.o $(FW)/runtime/boot-Info.plist
 	$(CC) $(LDFLAGS) $(PGO_LDFLAGS) -Wl,-sectcreate,__TEXT,__info_plist,$(FW)/runtime/boot-Info.plist $(BUILD)/fw/boot.o $(RT_OBJ) $(GAME_OBJ) \
@@ -104,12 +106,18 @@ runtime: $(RT_OBJ) $(GAME_OBJ) $(BUILD)/fw/boot.o
 # ---- macOS app ----
 app: $(BUILD)/boot
 	$(PYTHON) $(FW)/tools/make_app.py $(BUILD)/boot $(GAME_EXE) $(BUILD)/$(APP_NAME).app --name "$(APP_NAME)" \
-	    --bundle-id $(BUNDLE_ID) --category $(APP_CATEGORY)
+	    --bundle-id $(BUNDLE_ID) --category $(APP_CATEGORY) $(APP_FLAGS)
 
 # ---- Vulkan thunks (generated from the Vulkan headers) ----
 $(FW)/runtime/vk_thunks.h: $(FW)/tools/gen_vk.py $(FW)/third_party/vulkan/include/vulkan/vulkan_core.h
 	$(PYTHON) $(FW)/tools/gen_vk.py $(FW)/third_party/vulkan/include/vulkan/vulkan_core.h $@
 $(BUILD)/fw/vulkan.o: $(FW)/runtime/vk_thunks.h
+
+# ---- OpenGL thunks (generated from the macOS SDK's OpenGL/gl3.h) ----
+GL3_H = $(shell xcrun --show-sdk-path)/System/Library/Frameworks/OpenGL.framework/Headers/gl3.h
+$(FW)/runtime/gl_thunks.h: $(FW)/tools/gen_gl.py
+	$(PYTHON) $(FW)/tools/gen_gl.py "$(GL3_H)" $@
+$(BUILD)/fw/opengl.o: $(FW)/runtime/gl_thunks.h
 
 # ---- instruction fuzzer: every instruction form the exe uses, translated vs. original x86 (under Rosetta) ----
 fuzz:

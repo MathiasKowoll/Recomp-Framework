@@ -157,6 +157,14 @@ int main(int argc, char **argv) {
         if (!d) return 0;   // picker cancelled
         dir = d;
         snprintf(exe, sizeof exe, "%s/%s", d, rt_game.exe);
+        if (rt_game.image) {   // <app>/Contents/MacOS/<binary> -> <app>/Contents/Resources/<image>
+            char self[PATH_MAX], res[PATH_MAX + 64];
+            if (realpath(argv[0], self)) {
+                char *slash = strrchr(self, '/'); if (slash) *slash = 0;
+                snprintf(res, sizeof res, "%s/../Resources/%s", self, rt_game.image);
+                if (access(res, R_OK) == 0) snprintf(exe, sizeof exe, "%s", res);
+            }
+        }
         // game arguments: everything except macOS launch noise (-psn_..., -NSDocumentRevisionsDebugMode ...)
         gargv = calloc((size_t)argc + 1, sizeof *gargv); gargc = 0;
         gargv[gargc++] = argv[0];
@@ -174,6 +182,7 @@ int main(int argc, char **argv) {
         gargv = v;
     }
     rt_log("[boot] game folder %s\n", dir);
+    rt_log("[boot] image %s\n", exe);
     rt_load_image(exe);
     if (chdir(dir)) { perror(dir); return 1; }
     win32_init(gargc, gargv);

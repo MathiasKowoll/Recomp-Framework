@@ -42,7 +42,10 @@ typedef struct CPU {
     uint64_t stack_lo, stack_hi;
     uint64_t fn;              // guest function currently executing (debug)
     void *thread;             // runtime per-thread data
+    uint64_t mm[8];           // MMX registers (kept apart from the x87 stack: no game mixes the two without emms)
 } CPU;
+// one MMX register's lanes
+typedef union { uint64_t q[1]; int64_t l[1]; uint32_t u[2]; int32_t i[2]; uint16_t w[4]; int16_t h[4]; uint8_t b[8]; int8_t c[8]; } MM64;
 
 typedef void (*gfn)(CPU *);
 #define C (*c)

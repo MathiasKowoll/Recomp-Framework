@@ -475,6 +475,14 @@ void *rt_window_metal_layer(uint64_t h) {
     return w && w->ns ? cocoa_window_layer(w->ns) : NULL;
 }
 
+// client size in pixels of the top-level window that contains h (for the GL drawable, opengl.m)
+int rt_window_client_size(uint64_t h, int *cw, int *ch) {
+    Win *w = win_get(h);
+    if (!w) return 0;
+    *cw = w->cw; *ch = w->ch;
+    return 1;
+}
+
 // ---------------- show / position ----------------
 static void apply_show(CPU *c, struct Win *w, int cmd) {
     if (toplevel(w)) rt_log("[user32] ShowWindow(0x%llx \"%s\", %d)\n", (unsigned long long)w->hwnd, w->title, cmd);

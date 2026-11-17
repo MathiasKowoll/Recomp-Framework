@@ -213,9 +213,16 @@ static void update_presentation(RTWindow *w) {
     if (NSApp.presentationOptions != want) NSApp.presentationOptions = want;
 }
 
+// window titles come from ANSI APIs too: UTF-8 if valid, else Windows-1252 (stringWithUTF8String: gives nil)
+static NSString *title_str(const char *s) {
+    if (!s) return @"";
+    NSString *t = [NSString stringWithUTF8String:s];
+    if (!t) t = [[NSString alloc] initWithBytes:s length:strlen(s) encoding:NSWindowsCP1252StringEncoding];
+    return t ? t : @"";
+}
 void *cocoa_window_new(uint64_t hwnd, int x, int y, int cw, int ch, int titled, int resizable, int minimizable, const char *title) {
     __block void *res = NULL;
-    NSString *t = [NSString stringWithUTF8String:title ? title : ""];
+    NSString *t = title_str(title);
     on_main(^{
         app_init();
         NSWindowStyleMask sm = style_mask(titled, resizable, minimizable);
@@ -304,7 +311,7 @@ void cocoa_window_get_client(void *p, int *x, int *y, int *cw, int *ch) {
     (void)r; *x = gx; *y = gy; *cw = gw; *ch = gh;
 }
 void cocoa_window_set_title(void *p, const char *title) {
-    NSString *t = [NSString stringWithUTF8String:title ? title : ""];
+    NSString *t = title_str(title);
     on_main(^{ ((__bridge RTWindow *)p).title = t; });
 }
 void cocoa_window_activate(void *p) { on_main(^{ [NSApp activateIgnoringOtherApps:YES]; [(__bridge RTWindow *)p makeKeyAndOrderFront:nil]; }); }

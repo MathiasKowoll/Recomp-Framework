@@ -52,6 +52,29 @@ void I_advapi32_dll_RegOpenKeyExW(CPU *c) { I_advapi32_dll_RegOpenKeyExA(c); }
 void I_advapi32_dll_RegOpenKeyA(CPU *c) { if (A2) wr64(A2, 0); RET(ERROR_FILE_NOT_FOUND); }
 void I_advapi32_dll_RegCreateKeyExA(CPU *c) { if (AN(7)) wr64(AN(7), 0); RET(ERROR_FILE_NOT_FOUND); }
 void I_advapi32_dll_RegQueryValueExA(CPU *c) { RET(ERROR_FILE_NOT_FOUND); }
+// RegQueryInfoKeyA(key, class, *classlen, reserved, *subkeys, *maxsubkeylen, *maxclasslen, *values, *maxvaluenamelen,
+//                  *maxvaluelen, *secdesclen, *lastwrite): an empty key
+void I_advapi32_dll_RegQueryInfoKeyA(CPU *c) {
+    if (A2) wr32(A2, 0);
+    for (int i = 4; i <= 10; i++) if (AN(i)) wr32(AN(i), 0);
+    if (AN(11)) wr64(AN(11), 0);
+    RET(0);
+}
+void I_advapi32_dll_RegEnumValueA(CPU *c) { RET(259); }   // ERROR_NO_MORE_ITEMS
+
+// ---------------- dbghelp.dll: no symbols; the game's crash handler and stack tracer see it unavailable ----------------
+void I_dbghelp_dll_SymGetOptions(CPU *c) { RET(0); }
+void I_dbghelp_dll_SymSetOptions(CPU *c) { RET((uint32_t)A0); }
+void I_dbghelp_dll_SymInitialize(CPU *c) { RET(0); }
+void I_dbghelp_dll_SymCleanup(CPU *c) { RET(1); }
+void I_dbghelp_dll_StackWalk64(CPU *c) { RET(0); }
+void I_dbghelp_dll_SymFromAddr(CPU *c) { RET(0); }
+void I_dbghelp_dll_SymGetLineFromAddr64(CPU *c) { RET(0); }
+void I_dbghelp_dll_SymGetModuleInfo64(CPU *c) { RET(0); }
+void I_dbghelp_dll_SymGetModuleBase64(CPU *c) { RET(0); }
+void I_dbghelp_dll_SymFunctionTableAccess64(CPU *c) { RET(0); }
+void I_dbghelp_dll_UnDecorateSymbolName(CPU *c) { if (A1 && A2) wr8(A1, 0); RET(0); }
+void I_dbghelp_dll_MiniDumpWriteDump(CPU *c) { RET(0); }
 void I_advapi32_dll_RegQueryValueExW(CPU *c) { RET(ERROR_FILE_NOT_FOUND); }
 void I_advapi32_dll_RegSetValueExA(CPU *c) { RET(ERROR_INVALID_HANDLE); }
 void I_advapi32_dll_RegCloseKey(CPU *c) { RET(0); }

@@ -18,9 +18,12 @@
 #include <time.h>
 
 #define NSLOTS 96
-enum { IF_USER, IF_FRIENDS, IF_UTILS, IF_APPS, IF_USERSTATS, IF_MATCHMAKING, IF_NETWORKING, IF_CONTROLLER, IF_CLIENT, NIF };
+// ISteamRemoteStorage: every method answers 0 (cloud disabled, no files), so saves stay on local disk
+enum { IF_USER, IF_FRIENDS, IF_UTILS, IF_APPS, IF_USERSTATS, IF_MATCHMAKING, IF_NETWORKING, IF_CONTROLLER, IF_CLIENT,
+       IF_REMOTESTORAGE, NIF };
 static const char *if_names[NIF] = { "ISteamUser", "ISteamFriends", "ISteamUtils", "ISteamApps", "ISteamUserStats",
-                                     "ISteamMatchmaking", "ISteamNetworking", "ISteamController", "ISteamClient" };
+                                     "ISteamMatchmaking", "ISteamNetworking", "ISteamController", "ISteamClient",
+                                     "ISteamRemoteStorage" };
 static uint64_t objs[NIF];
 #include "game.h"
 #define app_id (rt_game.steam_app_id)
@@ -39,7 +42,7 @@ static void dispatch(CPU *c, int iface, int slot) {
     (f ? f : slot_default)(c, iface, slot);
 }
 
-// one native function per (interface, slot): see steam_slots.h
+// one native function per (interface, slot): see steam_slots.h (tools/gen_steam_slots.py NIF NSLOTS)
 #include "steam_slots.h"
 
 static uint64_t make_iface(int i) {
@@ -865,3 +868,4 @@ void I_steam_api64_dll_SteamMatchmaking(CPU *c) { RET(make_iface(IF_MATCHMAKING)
 void I_steam_api64_dll_SteamNetworking(CPU *c) { RET(make_iface(IF_NETWORKING)); }
 void I_steam_api64_dll_SteamController(CPU *c) { RET(make_iface(IF_CONTROLLER)); }
 void I_steam_api64_dll_SteamClient(CPU *c) { RET(make_iface(IF_CLIENT)); }
+void I_steam_api64_dll_SteamRemoteStorage(CPU *c) { RET(make_iface(IF_REMOTESTORAGE)); }

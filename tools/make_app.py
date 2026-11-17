@@ -2,9 +2,12 @@
 """Package the recompiled game as a macOS app bundle.
 
 usage: make_app.py BINARY GAME_EXE OUT.app [--name NAME] [--bundle-id ID] [--category UTI] [--version V]
+                   [--resource FILE[=NAME]]... [--no-vulkan]
   BINARY    the linked runtime + recompiled game (build/boot)
   GAME_EXE  the original Windows executable, used only for its icon
   --name    app and executable name (default: OUT.app's name)
+  --resource  copy FILE into Contents/Resources (as NAME), e.g. the image named by rt_game.image
+  --no-vulkan an OpenGL game: no Vulkan driver in the bundle
 The app finds the game folder itself on launch (see runtime/boot.c), so no game data goes in the bundle.
 """
 import os, plistlib, shutil, subprocess, sys, tempfile
@@ -18,6 +21,11 @@ app_name = opt("--name", None)
 bundle_id = opt("--bundle-id", None)
 category = opt("--category", "public.app-category.games")
 version = opt("--version", "0.1")
+resources = []
+while "--resource" in args:
+    resources.append(opt("--resource", None))
+no_vulkan = "--no-vulkan" in args
+if no_vulkan: args.remove("--no-vulkan")
 binary, game_exe, app = args[0], args[1], args[2]
 app_name = app_name or os.path.splitext(os.path.basename(app.rstrip("/")))[0]
 bundle_id = bundle_id or "com.example." + "".join(ch for ch in app_name.lower() if ch.isalnum()) + "-recomp"
@@ -34,7 +42,12 @@ shutil.copy2(binary, os.path.join(macos, app_name))
 # code goes in Frameworks/kosmickrisp, data (ICD json, drirc.d, VERSION) in Resources/kosmickrisp (codesign
 # rejects non-code files among the frameworks); the json points at the driver relative to itself
 kk = os.path.join(os.path.dirname(binary), "kosmickrisp")
-if os.path.isdir(kk):
+for r in resources:
+    src, _, name = r.partition("=")
+    shutil.copy2(src, os.path.join(res, name or os.path.basename(src)))
+if no_vulkan:
+    pass
+elif os.path.isdir(kk):
     fw_dir, res_dir = os.path.join(contents, "Frameworks", "kosmickrisp"), os.path.join(res, "kosmickrisp")
     os.makedirs(fw_dir); os.makedirs(res_dir)
     for f in os.listdir(kk):

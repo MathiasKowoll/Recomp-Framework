@@ -67,6 +67,20 @@ void I_xinput1_4_dll_XInputGetCapabilities(CPU *c) { get_caps(c); }
 void I_xinput1_4_dll_XInputEnable(CPU *c) { }
 void I_xinput1_4_dll_XInputGetBatteryInformation(CPU *c) { get_battery(c); }
 void I_xinput1_4_dll_XInputGetKeystroke(CPU *c) { get_keystroke(c); }
+// xinput1_3 (DirectX SDK, older games): same ordinals and functions
+void I_xinput1_3_dll__2(CPU *c) { get_state(c, 0); }
+void I_xinput1_3_dll__3(CPU *c) { set_state(c); }
+void I_xinput1_3_dll__4(CPU *c) { get_caps(c); }
+void I_xinput1_3_dll__5(CPU *c) { }   // XInputEnable
+void I_xinput1_3_dll__7(CPU *c) { get_battery(c); }
+void I_xinput1_3_dll__8(CPU *c) { get_keystroke(c); }
+void I_xinput1_3_dll__100(CPU *c) { get_state(c, 1); }
+void I_xinput1_3_dll_XInputGetState(CPU *c) { get_state(c, 0); }
+void I_xinput1_3_dll_XInputSetState(CPU *c) { set_state(c); }
+void I_xinput1_3_dll_XInputGetCapabilities(CPU *c) { get_caps(c); }
+void I_xinput1_3_dll_XInputEnable(CPU *c) { }
+void I_xinput1_3_dll_XInputGetBatteryInformation(CPU *c) { get_battery(c); }
+void I_xinput1_3_dll_XInputGetKeystroke(CPU *c) { get_keystroke(c); }
 
 // ---------------- ole32.dll ----------------
 #define REGDB_E_CLASSNOTREG 0x80040154u

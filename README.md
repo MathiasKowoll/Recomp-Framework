@@ -2,7 +2,7 @@
 
 A static recompilation framework for running games natively on Apple Silicon Macs. It has two targets:
 
-- **Windows x86-64**: the 64-bit Windows release of a game (PE executables and DLLs), with Vulkan graphics.
+- **Windows x86-64**: the 64-bit Windows release of a game (PE executables and DLLs), with Vulkan or OpenGL graphics.
 - **32-bit Intel Mac** (`mac32/`): Mac games built for 32-bit Intel Macs (2006–2019), which stopped running when
   macOS dropped 32-bit support in Catalina (i386 Mach-O, OpenGL).
 
@@ -36,11 +36,13 @@ game.c + runtime/ ──────────────────clang─
 | `tools/recomp64.py` | The translator |
 | `tools/pe.py` | PE reader: sections, imports, relocations, exception directory (`.pdata`) |
 | `tools/gen_vk.py` | Generates the Vulkan entry points from the Vulkan headers |
+| `tools/gen_gl.py` | Generates the OpenGL entry points from the macOS SDK's `OpenGL/gl3.h` |
+| `tools/gen_steam_slots.py` | Generates the per-slot stubs of the Steam interfaces (`runtime/steam_slots.h`) |
 | `tools/make_app.py`, `tools/app_icon.py` | App bundle packaging |
 | `tools/steam_play_tool.py` | Registers the app as a Steam Play compatibility tool in Steam for Mac (needs [NotProton](https://github.com/NotProtonNot/NotProton)), so the game's own Steam entry starts it, with the Steam overlay |
 | `runtime/` | The native runtime: execution core and the Windows platform layer |
 | `runtime/game.h` | The per-game settings interface |
-| `tests/` | Differential instruction fuzzer, offline Vulkan shader harness |
+| `tests/` | Differential instruction fuzzer (`insn_fuzz.py`, MMX: `mmx_fuzz.py`), offline Vulkan shader harness |
 | `patches/mesa/` | Patches applied to the KosmicKrisp Vulkan driver |
 | `template/` | Skeleton of a game project |
 | `recomp.mk` | Build rules included by game projects |
@@ -55,7 +57,7 @@ game.c + runtime/ ──────────────────clang─
 - **Instructions.** Instructions are decoded with Capstone and translated individually into C operating on the
   guest CPU state. Within a function, guest registers are cached in C locals; flags are written per instruction and the
   compiler removes the ones nothing reads. Packed SSE operations map to clang vector extensions, which compile to NEON. Supported: the general-purpose
-  ISA, SSE through SSE4.1 (with SSSE3 and POPCNT), and a subset of x87. Not supported: SSE4.2 string instructions
+  ISA, MMX, SSE through SSE4.1 (with SSSE3 and POPCNT), and a subset of x87. Not supported: SSE4.2 string instructions
   and AVX. The runtime's CPUID reports exactly what the translator supports, so games choose matching code paths.
 - **Function discovery.** Function starts are collected from:
   - the exception directory (`.pdata`), the entry point and exports;
@@ -107,6 +109,7 @@ game.c + runtime/ ──────────────────clang─
 | bcrypt | CommonCrypto |
 | Audio (WASAPI, XAudio2) | CoreAudio |
 | Vulkan | KosmicKrisp, Mesa's Vulkan driver for Metal, with Windows-only extensions translated (`VK_KHR_win32_surface` → Metal surface) |
+| OpenGL (WGL) | macOS's OpenGL 4.1 core profile (`opengl.m`); the window's framebuffer is emulated over IOSurfaces and presented through Metal, query names are shared across contexts, legacy texture formats become swizzled R/RG |
 | Steam API | The real `libsteam_api.dylib` (callbacks, matchmaking, P2P, stats and achievements), plus save sync to Steam Cloud |
 
 On the graphics side, `spvfix.c` rewrites SPIR-V patterns that desktop drivers tolerate but Metal does not. The
@@ -195,6 +198,8 @@ A separate translator and runtime for i386 Mach-O executables. Games link agains
 | `RT_FPS`, `RT_SCREENSHOT=n` with `RT_SCREENSHOT_FILE` | Frame-rate log; capture of frame *n* |
 | `RT_GPU_CAPTURE=seconds[:path]` | Metal GPU capture (`.gputrace`, opens in Xcode) of one frame presented that many seconds after launch |
 | `RT_HTTP_TRACE`, `RT_QUERY_STATS`, `RT_YIELD_STATS`, `RT_VK_FORMATS`, `RT_LIST_MODES` | Subsystem traces |
+| `RT_GL_CHECK=1`, `RT_GL_SHADERS=dir`, `RT_GL_SCREENSHOT=n` with `RT_GL_SCREENSHOT_FILE` | OpenGL games: `glGetError` after every call (logged once per function and error), shader dumps, capture of frame *n* |
+| `RT_NET_TRACE=1`, `RT_AUDIO_TRACE=1` | Socket setup and first receives; XAudio2 voices, routing and output level |
 | `tests/vs_probe.c` | Runs a captured vertex shader on the driver offline and reads back its outputs |
 
 ## Limitations

@@ -93,14 +93,16 @@ def const_loads(pe, text):
     return CONST_LOAD.sub(sub, text)
 
 def cache_registers(text):
-    text = text.replace("PUSH(c, ", "PUSHL(").replace("POP(c)", "POPL()")
+    # \b: leave the x87 FPUSH(c, v) / FPOP(c) alone
+    text = re.sub(r"\bPUSH\(c, ", "PUSHL(", text)
+    text = re.sub(r"\bPOP\(c\)", "POPL()", text)
     text = _GPR_RE.sub(r"R_\1", text)
     text = _XMM_RE.sub(r"X_\1", text)
     used_g = set(re.findall(r"\bR_(\w+)\b", text)) & set(GPRS)
     used_x = set(int(x) for x in re.findall(r"\bX_(\d+)\b", text))
     dirty_g = set(_GPR_W.findall(text)) & set(GPRS)
     dirty_x = set(int(x) for x in _XMM_W.findall(text))
-    if "PUSHL(" in text or "POPL()" in text:
+    if re.search(r"\b(PUSHL\(|POPL\(\))", text):
         used_g.add("rsp"); dirty_g.add("rsp")
     if not used_g and not used_x:
         return text
@@ -375,6 +377,7 @@ class FuncGen:
         if m.startswith("bnd "): m = m[4:]
         if m in ("repz ret", "rep ret", "repz ret ", "bnd ret"): m = "ret"
         if m == "movnti": m = "mov"   # non-temporal hint only
+        if self.mmx(i, m, ops): return
         if m in ("nop", "pause", "lfence", "sfence", "mfence", "cld", "wait", "fwait", "endbr64", "clflush") or m.startswith(("prefetch", "nop")):
             return
         if m == "int3" or m == "ud2" or m == "hlt":
@@ -617,14 +620,17 @@ class FuncGen:
         elif n == 2:
             if m in ("mul", "imul"):
                 t = "uint32_t" if m == "mul" else "int32_t"; c16 = "uint16_t" if m == "mul" else "int16_t"
-                e("{ %s p = (%s)(%s)C.rax * (%s)%s; C.rax = (C.rax & ~0xFFFFull) | (uint16_t)p; C.rdx = (C.rdx & ~0xFFFFull) | (uint16_t)((uint32_t)p >> 16); cf = of = (C.rdx & 0xFFFF) != 0; }" % (t, t, c16, c16, v))
+                # CF/OF: mul, the high half is non-zero; imul, the product doesn't fit in 16 signed bits
+                ov = "(C.rdx & 0xFFFF) != 0" if m == "mul" else "p != (int16_t)p"
+                e("{ %s p = (%s)(%s)C.rax * (%s)%s; C.rax = (C.rax & ~0xFFFFull) | (uint16_t)p; C.rdx = (C.rdx & ~0xFFFFull) | (uint16_t)((uint32_t)p >> 16); cf = of = %s; }" % (t, t, c16, c16, v, ov))
             else:
                 t, c16 = ("uint32_t", "uint16_t") if m == "div" else ("int32_t", "int16_t")
                 e("{ %s nn = (%s)(((uint32_t)(uint16_t)C.rdx << 16) | (uint16_t)C.rax); %s dd = (%s)%s; C.rax = (C.rax & ~0xFFFFull) | (uint16_t)(nn / dd); C.rdx = (C.rdx & ~0xFFFFull) | (uint16_t)(nn %% dd); }" % (t, t, c16, c16, v))
         else:
             if m in ("mul", "imul"):
                 t, c8 = ("uint32_t", "uint8_t") if m == "mul" else ("int32_t", "int8_t")
-                e("{ %s p = (%s)(%s)C.rax * (%s)%s; C.rax = (C.rax & ~0xFFFFull) | (uint16_t)p; cf = of = (p >> 8) != 0; }" % (t, t, c8, c8, v))
+                ov = "(p >> 8) != 0" if m == "mul" else "p != (int8_t)p"   # imul: doesn't fit in 8 signed bits
+                e("{ %s p = (%s)(%s)C.rax * (%s)%s; C.rax = (C.rax & ~0xFFFFull) | (uint16_t)p; cf = of = %s; }" % (t, t, c8, c8, v, ov))
             else:
                 t, c8 = ("uint32_t", "uint8_t") if m == "div" else ("int32_t", "int8_t")
                 e("{ %s nn = (%s)(%s)C.rax; %s dd = (%s)%s; C.rax = (C.rax & ~0xFFFFull) | (uint8_t)(nn / dd) | ((uint16_t)(uint8_t)(nn %% dd) << 8); }" % (t, t, "uint16_t" if m == "div" else "int16_t", c8, c8, v))
@@ -874,6 +880,64 @@ class FuncGen:
         "minpd": ("vd", "VSEL(a < b, a, b)"), "maxpd": ("vd", "VSEL(a > b, a, b)"),
     }
 
+    # -- MMX (64-bit integer SIMD on mm0-7); lane ops reuse the SSE tables at half the lane count --
+    def ismm(self, op):
+        return op.type == X.X86_OP_REG and re.match(r"mm[0-7]$", self.rn(op.reg) or "") is not None
+
+    def mmx(self, i, m, ops):
+        if m == "emms": return True
+        if not any(self.ismm(o) for o in ops): return False
+        e = self.e
+        def mm(op): return "C.mm[%d]" % int(self.rn(op.reg)[2])
+        def rd64(op):
+            if self.ismm(op): return mm(op)
+            if op.type == X.X86_OP_IMM: return "%dull" % (op.imm & 0xFFFFFFFFFFFFFFFF)
+            return "(uint64_t)%s" % self.rd(op)
+        d = ops[0]
+        if m in ("movd", "movq"):
+            if self.ismm(d):
+                v = rd64(ops[1]) if m == "movq" or self.ismm(ops[1]) else "(uint64_t)(uint32_t)%s" % self.rd(ops[1], 4)
+                e("%s = %s;" % (mm(d), v))
+            elif m == "movd": e(self.wr(d, "(uint32_t)%s" % mm(ops[1]), 4))
+            else: e(self.wr(d, mm(ops[1]), 8))
+            return True
+        if not self.ismm(d): raise Unsupported("mmx dest " + m)
+        D = mm(d)
+        src = rd64(ops[1]) if len(ops) > 1 else None
+        imm = ops[-1].imm if ops[-1].type == X.X86_OP_IMM else None
+        bit = {"pand": "a & b", "por": "a | b", "pxor": "a ^ b", "pandn": "~a & b"}
+        if m in bit:
+            e("{ uint64_t a = %s, b = %s; %s = %s; }" % (D, src, D, bit[m])); return True
+        if m in self.LANES and m.startswith("p") and src:
+            fl, n, ex = self.LANES[m]
+            e("{ MM64 s_ = {.q = {%s}}, d_ = {.q = {%s}}, r_; for (int k = 0; k < %d; k++) { __typeof__(d_.%s[0]) a = d_.%s[k], b = s_.%s[k]; (void)a; r_.%s[k] = (%s); } %s = r_.q[0]; }"
+              % (src, D, n // 2, fl, fl, fl, fl, ex, D)); return True
+        msh = re.match(r"ps(ll|rl|ra)(w|d|q)$", m)
+        if msh:
+            kind, w = msh.groups()
+            fl, n, bits = {"w": ("w", 4, 16), "d": ("u", 2, 32), "q": ("q", 1, 64)}[w]
+            cnt = "%dull" % imm if imm is not None else src
+            if kind == "ll": ex = "c_ >= %d ? 0 : d_.%s[k] << c_" % (bits, fl)
+            elif kind == "rl": ex = "c_ >= %d ? 0 : d_.%s[k] >> c_" % (bits, fl)
+            else: ex = "(d_.%s[k] >> (c_ >= %d ? %d : c_))" % ({"w": "h", "d": "i", "q": "l"}[w], bits, bits - 1)
+            e("{ MM64 d_ = {.q = {%s}}; uint64_t c_ = %s; for (int k = 0; k < %d; k++) d_.%s[k] = %s; %s = d_.q[0]; }" % (D, cnt, n, fl, ex, D)); return True
+        mu = re.match(r"punpck(l|h)(bw|wd|dq)$", m)
+        if mu and src:
+            hl, t = mu.groups()
+            fl, n = {"bw": ("b", 8), "wd": ("w", 4), "dq": ("u", 2)}[t]
+            base = 0 if hl == "l" else n // 2
+            e("{ MM64 s_ = {.q = {%s}}, d_ = {.q = {%s}}, r_; for (int k = 0; k < %d; k++) { r_.%s[2*k] = d_.%s[%d+k]; r_.%s[2*k+1] = s_.%s[%d+k]; } %s = r_.q[0]; }"
+              % (src, D, n // 2, fl, fl, base, fl, fl, base, D)); return True
+        pk = {"packuswb": ("h", "b", 4, 0, 255), "packsswb": ("h", "c", 4, -128, 127), "packssdw": ("i", "h", 2, -32768, 32767)}
+        if m in pk and src:
+            fi, fo, n, lo, hi = pk[m]
+            sat = "(v < %d ? %d : v > %d ? %d : v)" % (lo, lo, hi, hi)
+            e("{ MM64 s_ = {.q = {%s}}, d_ = {.q = {%s}}, r_; for (int k = 0; k < %d; k++) { int32_t v = d_.%s[k]; r_.%s[k] = %s; v = s_.%s[k]; r_.%s[%d+k] = %s; } %s = r_.q[0]; }"
+              % (src, D, n, fi, fo, sat, fi, fo, n, sat, D)); return True
+        if m == "pmaddwd" and src:
+            e("{ MM64 s_ = {.q = {%s}}, d_ = {.q = {%s}}, r_; for (int k = 0; k < 2; k++) r_.i[k] = (int32_t)((uint32_t)(d_.h[2*k] * s_.h[2*k]) + (uint32_t)(d_.h[2*k+1] * s_.h[2*k+1])); %s = r_.q[0]; }" % (src, D, D)); return True
+        raise Unsupported("mmx " + m)
+
     def vec(self, i, m, ops):
         if not ops or not self.isx(ops[0]):
             if m == "pextrw" and len(ops) == 3 and self.isx(ops[1]):
@@ -1114,7 +1178,7 @@ class Translator:
         pe = self.pe
         starts = set(pe.func_starts) | {pe.entry} | {v for v in pe.exports.values() if pe.is_code(v)}
         lite = cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_64)
-        code = pe.read(pe.text_lo, pe.text_hi - pe.text_lo)
+        code = pe.read_code()
         # pdata ranges (including chained parts) are known code
         covered = sorted((s, e) for s, (e, u) in pe.pdata.items())
         cov_lo = [s for s, e in covered]
@@ -1151,7 +1215,7 @@ class Translator:
                 scanned.add(s0)
                 nxt = srt[k + 1] if k + 1 < len(srt) else pe.text_hi
                 k2 = bisect.bisect_right(cov_lo, s0)
-                hi = min(nxt, cov_lo[k2] if k2 < len(cov_lo) else pe.text_hi)
+                hi = min(nxt, cov_lo[k2] if k2 < len(cov_lo) else pe.text_hi, pe.code_end(s0))
                 o = s0 - pe.text_lo
                 for (a, sz, mn, opst) in lite.disasm_lite(code[o:hi - pe.text_lo], s0):
                     if mn == "lea":
@@ -1199,14 +1263,14 @@ class Translator:
             parts[p].append((s, pe.pdata[s][0]))
         self.regions = {}
         for k, s in enumerate(self.funcs):
-            nxt = self.funcs[k + 1] if k + 1 < len(self.funcs) else pe.text_hi
+            nxt = min(self.funcs[k + 1] if k + 1 < len(self.funcs) else pe.text_hi, pe.code_end(s))
             if s in pe.pdata:
                 hi = min(pe.pdata[s][0], nxt) if pe.pdata[s][0] > s else nxt
                 self.regions[s] = [(s, hi)] + parts.get(s, [])
             else:
                 # leaf function without unwind data: until the next known start or covered range
                 k2 = bisect.bisect_right(cov_lo, s)
-                cap = cov_lo[k2] if k2 < len(cov_lo) else pe.text_hi
+                cap = min(cov_lo[k2] if k2 < len(cov_lo) else pe.text_hi, pe.code_end(s))
                 self.regions[s] = [(s, min(nxt, cap))]
         self.funcs_set = fset
         print("functions: %d (pdata %d, extra %d)" % (len(self.funcs), len(pe.func_starts), len(self.funcs) - len(set(pe.func_starts) & fset)))

@@ -1,4 +1,5 @@
 // wsock32.dll (imported by ordinal) on BSD sockets, plus iphlpapi's adapter query.
+// Ordinals 1-23 are alphabetical: ... 9 htons, 10 inet_addr, 11 inet_ntoa, 12 ioctlsocket, 13 listen ...
 // SOCKET values are host fds. Windows sockaddr has a 16-bit family where macOS has sin_len + an 8-bit
 // family; fd_set is a counted SOCKET array; timeval fields are 32-bit; SO_RCVTIMEO/SNDTIMEO are DWORD ms.
 #include "rt.h"
@@ -81,6 +82,9 @@ static void addr_out(const struct sockaddr_storage *in, uint64_t p, uint64_t ple
     wr32(plen, n);
 }
 static int sfd(uint64_t s) { return s == INVALID_SOCKET ? -1 : (int)s; }
+// RT_NET_TRACE=1: log socket setup and the first receive on each socket (with its blocking mode)
+static int net_trace = -1;
+#define NT(...) do { if (net_trace < 0) net_trace = getenv("RT_NET_TRACE") != NULL; if (net_trace) rt_log(__VA_ARGS__); } while (0)
 
 // #115 WSAStartup(version, WSADATA*) / #116 WSACleanup / #111 WSAGetLastError / #112 WSASetLastError
 void I_wsock32_dll__115(CPU *c) {
@@ -97,6 +101,7 @@ void I_wsock32_dll__23(CPU *c) {
     int fd = socket(af, (int)A1, (int)A2);
     if (fd < 0) { set_last_error(wsa_err(errno)); RET(INVALID_SOCKET); return; }
     int one = 1; setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+    NT("[net] socket(af %d, type %d, proto %d) -> %d\n", (int)A0, (int)A1, (int)A2, fd);
     RET((uint64_t)fd);
 }
 void I_wsock32_dll__3(CPU *c) { RET(close(sfd(A0)) ? fail() : 0); }   // closesocket
@@ -105,6 +110,7 @@ static void addr_call(CPU *c, int connect_) {
     struct sockaddr_storage a; socklen_t n = addr_in(A1, (uint32_t)A2, &a);
     if (!n) { set_last_error(10047); RET(SOCKET_ERROR); return; }
     int r = connect_ ? connect(sfd(A0), (struct sockaddr *)&a, n) : bind(sfd(A0), (struct sockaddr *)&a, n);
+    NT("[net] %s(%d) -> %d (errno %d)\n", connect_ ? "connect" : "bind", sfd(A0), r, r ? errno : 0);
     RET(r ? fail() : 0);
 }
 void I_wsock32_dll__2(CPU *c) { addr_call(c, 0); }
@@ -118,9 +124,10 @@ static void name_call(CPU *c, int peer) {
 }
 void I_wsock32_dll__6(CPU *c) { name_call(c, 0); }
 void I_wsock32_dll__5(CPU *c) { name_call(c, 1); }
-// #10 ioctlsocket(s, cmd, *arg): FIONBIO, FIONREAD
-void I_wsock32_dll__10(CPU *c) {
+// #12 ioctlsocket(s, cmd, *arg): FIONBIO, FIONREAD
+void I_wsock32_dll__12(CPU *c) {
     int fd = sfd(A0); uint32_t cmd = (uint32_t)A1;
+    NT("[net] ioctlsocket(%d, 0x%x, %u)\n", fd, cmd, A2 ? rd32(A2) : 0);
     if (cmd == 0x8004667Eu) {   // FIONBIO
         int fl = fcntl(fd, F_GETFL);
         if (fl < 0 || fcntl(fd, F_SETFL, rd32(A2) ? (fl | O_NONBLOCK) : (fl & ~O_NONBLOCK))) { RET(fail()); return; }
@@ -172,6 +179,8 @@ void I_wsock32_dll__19(CPU *c) { ssize_t r = send(sfd(A0), PTR(A1), (size_t)(int
 // #17 recvfrom(s, buf, len, flags, from, *fromlen)
 void I_wsock32_dll__17(CPU *c) {
     struct sockaddr_storage a; socklen_t n = sizeof a;
+    { static uint8_t seen[1024]; int fd = sfd(A0);
+      if (fd >= 0 && fd < 1024 && !seen[fd]) { seen[fd] = 1; NT("[net] first recvfrom(%d, flags %d): %s\n", fd, (int)A3, (fcntl(fd, F_GETFL) & O_NONBLOCK) ? "non-blocking" : "BLOCKING"); } }
     ssize_t r = recvfrom(sfd(A0), PTR(A1), (size_t)(int32_t)A2, (int)A3 & 3, (struct sockaddr *)&a, &n);
     if (r < 0) { RET(fail()); return; }
     addr_out(&a, AN(4), AN(5));
@@ -200,6 +209,7 @@ static void set_out(uint64_t p, fd_set *s) {
 }
 void I_wsock32_dll__18(CPU *c) {
     fd_set r, w, e; int maxfd = -1;
+    { static int n; if (n < 5) { n++; NT("[net] select(read %u, write %u, except %u, timeout %s)\n", A1 ? rd32(A1) : 0, A2 ? rd32(A2) : 0, A3 ? rd32(A3) : 0, AN(4) ? "set" : "none"); } }
     set_in(A1, &r, &maxfd); set_in(A2, &w, &maxfd); set_in(A3, &e, &maxfd);
     struct timeval tv, *ptv = NULL;
     if (AN(4)) { tv.tv_sec = (int32_t)rd32(AN(4)); tv.tv_usec = (int32_t)rd32(AN(4) + 4); ptv = &tv; }
@@ -213,15 +223,15 @@ void I_wsock32_dll__8(CPU *c) { RET(__builtin_bswap32((uint32_t)A0)); }
 void I_wsock32_dll__9(CPU *c) { RET(__builtin_bswap16((uint16_t)A0)); }
 void I_wsock32_dll__14(CPU *c) { RET(__builtin_bswap32((uint32_t)A0)); }
 void I_wsock32_dll__15(CPU *c) { RET(__builtin_bswap16((uint16_t)A0)); }
-// #12 inet_ntoa(in_addr by value) -> per-thread static string
-void I_wsock32_dll__12(CPU *c) {
+// #11 inet_ntoa(in_addr by value) -> per-thread static string
+void I_wsock32_dll__11(CPU *c) {
     static __thread char buf[16];
     uint32_t a = (uint32_t)A0;
     snprintf(buf, sizeof buf, "%u.%u.%u.%u", a & 0xFF, (a >> 8) & 0xFF, (a >> 16) & 0xFF, a >> 24);
     RET(G(buf));
 }
-// #11 inet_addr("a.b.c.d")
-void I_wsock32_dll__11(CPU *c) { struct in_addr a; RET(inet_aton(PTR(A0), &a) ? a.s_addr : 0xFFFFFFFFu); }
+// #10 inet_addr("a.b.c.d")
+void I_wsock32_dll__10(CPU *c) { struct in_addr a; RET(inet_aton(PTR(A0), &a) ? a.s_addr : 0xFFFFFFFFu); }
 // #52 gethostbyname(name): IPv4 only. hostent (x64): h_name +0, h_aliases +8, h_addrtype +16, h_length +18, h_addr_list +24
 void I_wsock32_dll__52(CPU *c) {
     static __thread uint8_t he[32]; static __thread char name[256]; static __thread uint32_t addrs[8]; static __thread uint64_t list[9], aliases[1];

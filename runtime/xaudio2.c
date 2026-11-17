@@ -1,8 +1,9 @@
-// XAudio2 2.7 (the DirectX SDK version, created through CoCreateInstance) as a silent engine.
+// XAudio2 2.7 (the DirectX SDK version, created through CoCreateInstance).
 // Voices accept formats, buffers and parameters like the real thing; an audio thread runs a 10 ms
 // processing pass that consumes queued buffers in real time (play regions, loops, frequency ratio)
-// and calls the game's voice/engine callbacks at the points XAudio2 would. No sound is produced yet:
-// a mixer can later render the same buffers into CoreAudio.
+// and calls the game's voice/engine callbacks at the points XAudio2 would. PCM (16-bit, float) source
+// voices are mixed to stereo into a CoreAudio output unit; submix voices and effects are not applied.
+// RT_AUDIO_TRACE=1 logs the playing voices and the output level every 5 s.
 //
 // All XAudio2 2.7 structures are tightly packed (#pragma pack(1) in xaudio2.h), hence the odd offsets.
 // Callbacks run without the engine lock held (as on Windows), so they may call back into the engine.
@@ -39,6 +40,10 @@ typedef struct Voice {
     double pos; uint32_t loops_left;      // position in the current buffer (samples)
     uint64_t played;                      // samples played since creation
     uint64_t flushed[MAX_QUEUED]; int nflushed;   // contexts whose OnBufferEnd is still owed
+    struct Voice *dest;                   // output voice (a submix), or NULL for the master
+    struct Voice *mat_for;                // the destination the stored output matrix applies to (NULL: master)
+    uint32_t stage;                       // submix processing stage (lower runs first)
+    float *bus;                           // submix: this pass's input, PASS_FRAMES x channels
     struct Voice *next;
 } Voice;
 typedef struct {
@@ -125,18 +130,15 @@ static float pcm(const Voice *v, uint64_t data, uint64_t frame, uint32_t ch) {
     return (int32_t)rd32(p + 4ull * ch) / 2147483648.0f;
 }
 // Render n output frames of one source voice into mix (stereo), consuming its buffers like advance().
-static int mix_voice(Voice *v, float *mix, int n, float master, Ev *ev, int maxev) {
+// Render n frames of one source voice at its own channel count into out (n x channels, interleaved), with its
+// volume and channel volumes, consuming its buffers like advance(). Routing to the destination is route()'s job.
+static int mix_voice(Voice *v, float *out, int n, Ev *ev, int maxev) {
     int k = 0;
     for (int i = 0; i < v->nflushed && k < maxev; i++) ev[k++] = (Ev){ 4, v->flushed[i] };
     v->nflushed = 0;
     double step = (double)v->rate * (double)v->ratio / OUT_RATE;
-    // gains: output matrix (dest-major: level[d * src + s]) when set for 2 outputs, else mono->both / stereo direct
-    float g[2][8] = { { 0 } };
     uint32_t sc = v->channels;
-    if (v->mat_dst == 2 && v->mat_src == sc) for (uint32_t d = 0; d < 2; d++) for (uint32_t c = 0; c < sc; c++) g[d][c] = v->matrix[d * sc + c];
-    else if (sc == 1) g[0][0] = g[1][0] = 1;
-    else { g[0][0] = g[1][1] = 1; }
-    float vol = v->volume * master;
+    float cv[8]; for (uint32_t c = 0; c < sc && c < 8; c++) cv[c] = v->volume * v->chan_vol[c];
     for (int i = 0; i < n; i++) {
         while (v->nq && k < maxev - 3) {
             Buf *b = &v->q[0];
@@ -164,12 +166,54 @@ static int mix_voice(Voice *v, float *mix, int n, float master, Ev *ev, int maxe
         float t = (float)(v->pos - (double)f0);
         for (uint32_t c = 0; c < sc; c++) {
             float x = pcm(v, b->data, f0, c) * (1 - t) + pcm(v, b->data, f1, c) * t;
-            mix[2 * i] += x * g[0][c] * vol; mix[2 * i + 1] += x * g[1][c] * vol;
+            out[(size_t)i * sc + c] += x * cv[c];
         }
         v->pos += step;
         v->played++;
     }
     return k;
+}
+
+// ---------------- routing: source -> submix(es) -> master ----------------
+// XAudio2's default speaker mapping when no output matrix is set (dest-major: g[d * sc + s]); 5.1/7.1 order is
+// FL FR FC LFE BL BR (SL SR)
+static void default_matrix(uint32_t sc, uint32_t dc, float *g) {
+    memset(g, 0, sizeof(float) * sc * dc);
+    if (sc == dc) { for (uint32_t i = 0; i < sc; i++) g[i * sc + i] = 1; return; }
+    if (sc == 1) { for (uint32_t d = 0; d < dc; d++) g[d] = d < 2 || dc < 3 ? 1 : 0; return; }
+    if (dc == 1) { for (uint32_t c = 0; c < sc; c++) g[c] = 1.0f / sc; return; }
+    if (dc == 2) {
+        static const float l[8] = { 1, 0, 0.7071f, 0, 1, 0, 1, 0 }, r[8] = { 0, 1, 0.7071f, 0, 0, 1, 0, 1 };
+        for (uint32_t c = 0; c < sc && c < 8; c++) { g[c] = l[c]; g[sc + c] = r[c]; }
+        return;
+    }
+    for (uint32_t i = 0; i < sc && i < dc; i++) g[i * sc + i] = 1;
+}
+// add n frames of in (sc channels) into the destination's bus (dc channels)
+static void route(Voice *v, const float *in, uint32_t sc, int n, float *bus, uint32_t dc, Voice *dest_voice) {
+    float g[64];
+    if (v->mat_for == dest_voice && v->mat_src == sc && v->mat_dst == dc) memcpy(g, v->matrix, sizeof(float) * sc * dc);
+    else default_matrix(sc, dc, g);
+    for (int i = 0; i < n; i++)
+        for (uint32_t d = 0; d < dc; d++) {
+            float acc = 0;
+            for (uint32_t c = 0; c < sc; c++) acc += in[(size_t)i * sc + c] * g[d * sc + c];
+            bus[(size_t)i * dc + d] += acc;
+        }
+}
+// XAUDIO2_VOICE_SENDS (2.7, packed): SendCount +0, pSends +4; XAUDIO2_SEND_DESCRIPTOR: Flags +0, pOutputVoice +4 (12 bytes).
+// The first send is used. An output that is not a live voice of the engine (or the master) means the master.
+static Engine *g_engine;
+static Voice *parse_sends(Voice *self, uint64_t sends) {
+    if (!sends) return NULL;
+    uint32_t n = rd32(sends); uint64_t arr = rd64(sends + 4);
+    if (!n || !arr) return NULL;
+    Voice *d = (Voice *)PTR(rd64(arr + 4));
+    static int warned;
+    if (n > 1 && !warned) { warned = 1; rt_log("[xaudio2] voice with %u sends: only the first is mixed\n", n); }
+    for (Voice *v = g_engine ? g_engine->voices : NULL; v; v = v->next)
+        if (v == d && v != self && !v->dead) return v->kind == V_SUBMIX ? v : NULL;
+    return NULL;
 }
 
 // ---------------- output: CoreAudio unit draining a stereo float ring ----------------
@@ -237,12 +281,17 @@ static void *audio_main(void *p) {
             continue;
         }
         float master = e->master ? e->master->volume : 1;
-        static float mix[PASS_FRAMES * 2];
-        memset(mix, 0, sizeof mix);
+        uint32_t mch = e->master && e->master->channels && e->master->channels <= 8 ? e->master->channels : 2;
+        static float mix[PASS_FRAMES * 2], mbus[PASS_FRAMES * 8], tmp[PASS_FRAMES * 8];
+        memset(mix, 0, sizeof mix); memset(mbus, 0, sizeof mbus);
         e->in_pass = 1;
         uint64_t cbs[8]; int ncb = e->ncallbacks; memcpy(cbs, e->callbacks, sizeof cbs);
         Voice *list[512]; int nv = 0;
-        for (Voice *v = e->voices; v && nv < 512; v = v->next) if (v->kind == V_SOURCE && v->started && !v->dead) list[nv++] = v;
+        Voice *subs[64]; int ns = 0;
+        for (Voice *v = e->voices; v; v = v->next) {
+            if (v->kind == V_SOURCE && v->started && !v->dead && nv < 512) list[nv++] = v;
+            if (v->kind == V_SUBMIX && !v->dead && v->bus && ns < 64) { subs[ns++] = v; memset(v->bus, 0, sizeof(float) * PASS_FRAMES * v->channels); }
+        }
         pthread_mutex_unlock(&xmu);
 
         for (int i = 0; i < ncb; i++) cb_call(e->cpu, cbs[i], 0, 1, 0, 0);
@@ -252,12 +301,57 @@ static void *audio_main(void *p) {
             cb_call(e->cpu, v->callback, 0, 2, bytes_needed(v, step), 0);
             Ev ev[64];
             pthread_mutex_lock(&xmu);
-            int n = v->dead ? 0 : have_out && mixable(v) ? mix_voice(v, mix, PASS_FRAMES, master, ev, 64) : advance(v, step, ev, 64);
+            int n = 0;
+            if (!v->dead && have_out && mixable(v) && v->channels <= 8) {
+                memset(tmp, 0, sizeof(float) * PASS_FRAMES * v->channels);
+                n = mix_voice(v, tmp, PASS_FRAMES, ev, 64);
+                Voice *d = v->dest && !v->dest->dead && v->dest->bus ? v->dest : NULL;
+                if (d) route(v, tmp, v->channels, PASS_FRAMES, d->bus, d->channels, d);
+                else route(v, tmp, v->channels, PASS_FRAMES, mbus, mch, NULL);
+            } else if (!v->dead) n = advance(v, step, ev, 64);
             pthread_mutex_unlock(&xmu);
             for (int k = 0; k < n; k++) cb_call(e->cpu, v->callback, ev[k].kind, ev[k].kind == 2 ? 1 : 2, ev[k].ctx, 0);
             cb_call(e->cpu, v->callback, 1, 1, 0, 0);
         }
+        // submixes, lowest processing stage first: volume, channel volumes, then on to their output
+        pthread_mutex_lock(&xmu);
+        for (int a = 1; a < ns; a++) { Voice *t = subs[a]; int b = a - 1; while (b >= 0 && subs[b]->stage > t->stage) { subs[b + 1] = subs[b]; b--; } subs[b + 1] = t; }
+        for (int a = 0; a < ns; a++) {
+            Voice *sm = subs[a];
+            if (sm->dead) continue;
+            uint32_t sc = sm->channels;
+            for (int i = 0; i < PASS_FRAMES; i++) for (uint32_t c = 0; c < sc; c++) sm->bus[(size_t)i * sc + c] *= sm->volume * sm->chan_vol[c];
+            Voice *d = sm->dest && !sm->dest->dead && sm->dest->bus && sm->dest->stage > sm->stage ? sm->dest : NULL;
+            if (d) route(sm, sm->bus, sc, PASS_FRAMES, d->bus, d->channels, d);
+            else route(sm, sm->bus, sc, PASS_FRAMES, mbus, mch, NULL);
+        }
+        pthread_mutex_unlock(&xmu);
+        // master: its channels down to the stereo device, with the master volume
+        { float g[16]; default_matrix(mch, 2, g);
+          for (int i = 0; i < PASS_FRAMES; i++) for (uint32_t d = 0; d < 2; d++) {
+              float acc = 0; for (uint32_t c = 0; c < mch; c++) acc += mbus[(size_t)i * mch + c] * g[d * mch + c];
+              mix[2 * i + d] = acc * master; } }
         for (int i = 0; i < ncb; i++) cb_call(e->cpu, cbs[i], 1, 1, 0, 0);
+        // RT_AUDIO_TRACE=1: every 5 s, the playing voices and the output peak
+        { static int tr = -1; static uint64_t passes; static float peak;
+          if (tr < 0) tr = getenv("RT_AUDIO_TRACE") != NULL;
+          if (tr) {
+              for (int i = 0; i < PASS_FRAMES * 2; i++) { float a = mix[i] < 0 ? -mix[i] : mix[i]; if (a > peak) peak = a; }
+              if (++passes % 500 == 0) {
+                  pthread_mutex_lock(&xmu);
+                  int ns = 0; for (Voice *v = e->voices; v; v = v->next) if (v->kind == V_SOURCE) ns++;
+                  rt_log("[xaudio2] trace: %d source voices, %d started, master vol %.2f, output peak %.3f, have_out %d\n", ns, nv, master, peak, have_out);
+                  int shown = 0;
+                  for (Voice *v = e->voices; v && shown < 12; v = v->next) if (v->kind == V_SOURCE && v->started && !v->dead) {
+                      shown++;
+                      rt_log("[xaudio2]   voice %p fmt 0x%x %uch %uHz block %u mixable %d vol %.2f ratio %.2f matrix %ux%u [%.2f %.2f %.2f %.2f] queued %d played %llu\n",
+                             (void *)v, v->format, v->channels, v->rate, v->block_align, mixable(v), v->volume, v->ratio, v->mat_src, v->mat_dst,
+                             v->matrix[0], v->matrix[1], v->matrix[2], v->matrix[3], v->nq, (unsigned long long)v->played);
+                  }
+                  pthread_mutex_unlock(&xmu);
+                  peak = 0;
+              }
+          } }
         if (have_out) {
             for (int i = 0; i < PASS_FRAMES; i++) {
                 uint64_t j = (ring_w + i) % RING;
@@ -276,10 +370,9 @@ static void *audio_main(void *p) {
 }
 
 // ---------------- IXAudio2Voice (shared by all voice kinds) ----------------
-static Engine *g_engine;
 // GetVoiceDetails(this, XAUDIO2_VOICE_DETAILS*): CreationFlags, InputChannels, InputSampleRate
 static void v_GetVoiceDetails(CPU *c) { Voice *v = THIS_V; wr32(A1, v->flags); wr32(A1 + 4, v->channels); wr32(A1 + 8, v->rate); }
-static void v_SetOutputVoices(CPU *c) { RET(S_OK); }
+static void v_SetOutputVoices(CPU *c) { pthread_mutex_lock(&xmu); THIS_V->dest = parse_sends(THIS_V, A1); pthread_mutex_unlock(&xmu); RET(S_OK); }
 static void v_SetEffectChain(CPU *c) { RET(S_OK); }
 static void v_EnableEffect(CPU *c) { RET(S_OK); }
 static void v_DisableEffect(CPU *c) { RET(S_OK); }
@@ -299,7 +392,13 @@ static void v_GetChannelVolumes(CPU *c) { Voice *v = THIS_V; for (uint32_t i = 0
 // SetOutputMatrix(this, dest, srcCh, dstCh, const float *levels, op) / GetOutputMatrix(this, dest, srcCh, dstCh, float *levels)
 static void v_SetOutputMatrix(CPU *c) {
     Voice *v = THIS_V; uint32_t s = (uint32_t)A2, d = (uint32_t)A3;
-    if (s * d <= 64 && AN(4)) { memcpy(v->matrix, PTR(AN(4)), 4ull * s * d); v->mat_src = s; v->mat_dst = d; }
+    if (s * d <= 64 && AN(4)) {
+        pthread_mutex_lock(&xmu);
+        Voice *dv = (Voice *)PTR(A1);
+        memcpy(v->matrix, PTR(AN(4)), 4ull * s * d); v->mat_src = s; v->mat_dst = d;
+        v->mat_for = dv && dv->kind == V_SUBMIX ? dv : NULL;   // NULL dest or the master: the master
+        pthread_mutex_unlock(&xmu);
+    }
     RET(S_OK);
 }
 static void v_GetOutputMatrix(CPU *c) {
@@ -430,13 +529,25 @@ static void e_CreateSourceVoice(CPU *c) {
     float mr = rdf(c->rsp + 8 + 8 * 4);
     v->max_ratio = mr >= 1 ? mr : 2;
     v->callback = AN(5);
+    pthread_mutex_lock(&xmu); v->dest = parse_sends(v, AN(6)); pthread_mutex_unlock(&xmu);
     wr64(A1, G(v));
     static int logged;
     if (logged++ < 8) rt_log("[xaudio2] source voice: format 0x%x, %u ch, %u Hz, block %u%s\n", v->format, v->channels, v->rate, v->block_align, v->callback ? ", callback" : "");
     RET(S_OK);
 }
 // CreateSubmixVoice(this, **voice, channels, rate, flags, stage, sends, effects)
-static void e_CreateSubmixVoice(CPU *c) { if (!A1) { RET(E_INVALIDARG); return; } wr64(A1, G(new_voice(THIS_E, V_SUBMIX, (uint32_t)A2, (uint32_t)A3, (uint32_t)AN(4)))); RET(S_OK); }
+static void e_CreateSubmixVoice(CPU *c) {
+    if (!A1 || !(uint32_t)A2 || (uint32_t)A2 > 8) { RET(E_INVALIDARG); return; }
+    Voice *v = new_voice(THIS_E, V_SUBMIX, (uint32_t)A2, (uint32_t)A3, (uint32_t)AN(4));
+    pthread_mutex_lock(&xmu);
+    v->stage = (uint32_t)AN(5);
+    v->bus = calloc((size_t)PASS_FRAMES * v->channels, sizeof(float));
+    v->dest = parse_sends(v, AN(6));
+    pthread_mutex_unlock(&xmu);
+    static int logged; if (logged++ < 16) rt_log("[xaudio2] submix voice: %u ch, %u Hz, stage %u -> %s\n", v->channels, v->rate, v->stage, v->dest ? "submix" : "master");
+    wr64(A1, G(v));
+    RET(S_OK);
+}
 // CreateMasteringVoice(this, **voice, channels, rate, flags, deviceIndex, effects): 0 means the device default
 static void e_CreateMasteringVoice(CPU *c) {
     Engine *e = THIS_E;
@@ -480,9 +591,40 @@ static void build_vtables(void) {
     for (int i = 0; i < 19; i++) vt_voice[i] = vt_source[i] = rt_host_fn(voice[i], "IXAudio2Voice");
     for (int i = 0; i < 10; i++) vt_source[19 + i] = rt_host_fn(src[i], "IXAudio2SourceVoice");
 }
+// ---------------- XAPO effects (xaudio2fx: AudioReverb, AudioVolumeMeter) ----------------
+// The silent engine ignores effect chains, so an effect only has to be a well-behaved object: IUnknown, IXAPO and
+// IXAPOParameters, passing audio through. Games create these and hand them to SetEffectChain.
+typedef struct { uint64_t vtbl; uint32_t refs; } Xapo;
+static uint64_t vt_xapo[15];
+static void x_QueryInterface(CPU *c) { wr64(A2, A0); ((Xapo *)PTR(A0))->refs++; RET(S_OK); }
+static void x_AddRef(CPU *c) { RET(++((Xapo *)PTR(A0))->refs); }
+static void x_Release(CPU *c) { Xapo *x = PTR(A0); RET(x->refs ? --x->refs : 0); }   // kept: a voice may still name it
+static void x_GetRegistrationProperties(CPU *c) { if (A1) wr64(A1, 0); RET(0x80004001u); }   // E_NOTIMPL
+static void x_IsFormatSupported(CPU *c) { if (A3) wr64(A3, 0); RET(S_OK); }
+static void x_Initialize(CPU *c) { RET(S_OK); }
+static void x_Nothing(CPU *c) { }
+static void x_LockForProcess(CPU *c) { RET(S_OK); }
+static void x_CalcFrames(CPU *c) { RET((uint32_t)A1); }
+static void x_GetParameters(CPU *c) { if (A1 && A2) memset(PTR(A1), 0, (uint32_t)A2); }
+static void build_xapo_vtable(void) {
+    static const gfn f[15] = { x_QueryInterface, x_AddRef, x_Release, x_GetRegistrationProperties, x_IsFormatSupported,
+        x_IsFormatSupported, x_Initialize, x_Nothing /* Reset */, x_LockForProcess, x_Nothing /* UnlockForProcess */,
+        x_Nothing /* Process */, x_CalcFrames, x_CalcFrames, x_Nothing /* SetParameters */, x_GetParameters };
+    for (int i = 0; i < 15; i++) vt_xapo[i] = rt_host_fn(f[i], "IXAPO (pass-through)");
+}
+
 // Called by CoCreateInstance. Returns REGDB_E_CLASSNOTREG for classes that are not XAudio2.
 uint32_t xaudio2_cocreate(uint64_t clsid, uint64_t iid, uint64_t ppv) {
     uint32_t d1 = rd32(clsid);
+    // 2.7 effects: AudioReverb {6A93130E-...} (+ _Debug {C4F82DD4-...}), AudioVolumeMeter {CAC1105F-...} (+ _Debug {2D9A0F9C-...})
+    if (d1 == 0x6A93130Eu || d1 == 0xC4F82DD4u || d1 == 0xCAC1105Fu || d1 == 0x2D9A0F9Cu) {
+        static pthread_once_t once = PTHREAD_ONCE_INIT;
+        pthread_once(&once, build_xapo_vtable);
+        Xapo *x = calloc(1, sizeof *x);
+        x->vtbl = G(vt_xapo); x->refs = 1;
+        wr64(ppv, G(x));
+        return S_OK;
+    }
     // CLSID_XAudio2 (2.7) {5A508685-...}, CLSID_XAudio2_Debug (2.7) {DB05EA35-...}
     if (d1 != 0x5A508685u && d1 != 0xDB05EA35u) return REGDB_E_CLASSNOTREG;
     pthread_once(&x_once, build_vtables);
@@ -493,6 +635,19 @@ uint32_t xaudio2_cocreate(uint64_t clsid, uint64_t iid, uint64_t ppv) {
         pthread_create(&e->thread, NULL, audio_main, e);
         g_engine = e;
         rt_log("[xaudio2] engine created (2.7)\n");
+    }
+    static int released_before;
+    if (g_engine->refs == 0 && released_before++) {
+        // The previous instance was fully released: hand out a fresh one, as XAudio2Create would. Its voices die with
+        // it (unlinked, not freed: the guest may still hold stale pointers), and a new engine starts out running.
+        pthread_mutex_lock(&xmu);
+        while (g_engine->in_pass) pthread_cond_wait(&xcv, &xmu);
+        for (Voice *v = g_engine->voices; v; v = v->next) v->dead = 1;
+        g_engine->voices = NULL; g_engine->master = NULL;
+        g_engine->ncallbacks = 0;
+        g_engine->running = 1;
+        pthread_mutex_unlock(&xmu);
+        rt_log("[xaudio2] engine re-created (2.7)\n");
     }
     g_engine->refs++;
     wr64(ppv, G(g_engine));
