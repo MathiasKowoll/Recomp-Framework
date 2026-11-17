@@ -39,7 +39,8 @@ game.c + runtime/ ──────────────────clang─
 | `tools/gen_gl.py` | Generates the OpenGL entry points from the macOS SDK's `OpenGL/gl3.h` |
 | `tools/gen_steam_slots.py` | Generates the per-slot stubs of the Steam interfaces (`runtime/steam_slots.h`) |
 | `tools/make_app.py`, `tools/app_icon.py` | App bundle packaging |
-| `tools/steam_play_tool.py` | Registers the app as a Steam Play compatibility tool in Steam for Mac (needs [NotProton](https://github.com/NotProtonNot/NotProton)), so the game's own Steam entry starts it, with the Steam overlay |
+| `tools/nsr.py` | **NightSight Recomp (NSR)**: one Steam Play compatibility tool for every recomp (needs [NotProton](https://github.com/NotProtonNot/NotProton)). Each game's own Steam entry starts its app, with the Steam overlay and NotProton plugins; see [Steam Play](#steam-play-nightsight-recomp-nsr) |
+| `tools/steam_play_tool.py` | The older one-tool-per-game registration (kept for existing installers) |
 | `runtime/` | The native runtime: execution core and the Windows platform layer |
 | `runtime/game.h` | The per-game settings interface |
 | `tests/` | Differential instruction fuzzer (`insn_fuzz.py`, MMX: `mmx_fuzz.py`), offline Vulkan shader harness |
@@ -135,18 +136,46 @@ Translated game DLLs (video codecs, scripting engines…) are registered as modu
    | `relaunch_prefix` | Executables the game starts that should relaunch the app instead |
    | `extra_args` | Arguments always passed to the game |
    | `cloud_save_dir`, `cloud_prefix` | Optional Steam Cloud sync of a save folder |
+   | `image` | Optional executable image in the app's `Resources`, loaded instead of the game folder's exe (e.g. a DRM-free copy made at build time; `make_app.py --resource`) |
+   | `gl_extensions` | OpenGL games: extra names for `GL_EXTENSIONS` the engine checks for |
 
 3. Link the game's executable as `orig.exe`, then run `make kosmickrisp` (once), `make gen` and `make app`.
 4. Run `make fuzz`. It checks the translator against the original instructions, run under Rosetta as the
    reference, for most instruction forms the executable uses. It skips `rep` string instructions, AVX and x87.
 5. Add DLLs that contain code with `MODULE_RULES` (see `recomp.mk`).
 6. Implement missing Windows functions as the game needs them. Calls to unimplemented imports are logged.
+7. Optionally register the app with NSR, so it starts from the game's own Steam entry (see below).
 
 Requirements:
 - An Apple Silicon Mac with macOS 26 or newer.
 - Xcode Command Line Tools.
 - Python 3 with `capstone==5.0.6` and `lief==0.16.6`.
 - To build the Vulkan driver: Homebrew `llvm`, `libclc` and `spirv-llvm-translator`, plus the Vulkan SDK.
+
+## Steam Play: NightSight Recomp (NSR)
+
+Steam for Mac has Steam Play compatibility tools switched off; [NotProton](https://github.com/NotProtonNot/NotProton)
+switches them on. `tools/nsr.py` registers one tool, **NightSight Recomp (NSR)**, for any number of recomps. Choose it
+for a game (Properties > Compatibility > Force the use of a specific Steam Play compatibility tool) and Play on the
+game's own library entry starts the native app on the Windows release Steam installed, with playtime, presence and
+the Steam overlay.
+
+```
+python3 tools/nsr.py install
+python3 tools/nsr.py add --appid 379720 --app /Applications/DOOM.app --pass-paths --exe 'doomx64*.exe' --force-exe DOOMx64vk.exe
+python3 tools/nsr.py list
+```
+
+- `--pass-paths` starts the app as `app <exe> <game folder>`, which Recomp-Framework apps take (with `rt_game.image`,
+  the bundled image replaces the exe Steam passes); without it the app only gets the game's own arguments.
+- `--exe` is the exe Steam starts as the game (anything else it runs first, such as redistributable installers,
+  finishes at once); `--force-exe` always passes one exe from the game folder.
+- NotProton plugins in `~/Library/Application Support/notproton/plugins/*.conf` that are switched on for the game are
+  applied as NotProton's own launcher does: `inject` loads the plugin's dylib after Steam's overlay, `env` lines and
+  `NOTPROTON_ENV_<NAME>` options set variables, and `depends`, `requires` and `tools` (the tool's name is `nsr`) are
+  honoured.
+- Each launch is logged to `~/Library/Logs/nsr.log`. Games live in `compatibilitytools.d/nsr/games.conf`, one line
+  each.
 
 ## 32-bit Intel Mac games (`mac32/`)
 

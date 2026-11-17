@@ -16,6 +16,7 @@
 #include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <strings.h>
 
 void win32_init(int argc, char **argv);
 
@@ -116,6 +117,18 @@ static void pgo_output(void) {
 }
 #endif
 
+// rt_game.image bundled in the app: <app>/Contents/MacOS/<binary> -> <app>/Contents/Resources/<image>
+static int bundled_image(const char *argv0, char *out, size_t n) {
+    char self[PATH_MAX];
+    if (!rt_game.image || !realpath(argv0, self)) return 0;
+    char *slash = strrchr(self, '/'); if (slash) *slash = 0;
+    char res[PATH_MAX + 64];
+    snprintf(res, sizeof res, "%s/../Resources/%s", self, rt_game.image);
+    if (access(res, R_OK) != 0) return 0;
+    snprintf(out, n, "%s", res);
+    return 1;
+}
+
 int main(int argc, char **argv) {
 #ifdef __LLVM_INSTR_PROFILE_GENERATE
     pgo_output();
@@ -150,6 +163,10 @@ int main(int argc, char **argv) {
     for (int i = 0; i < boot_nprefix; i++) { char rp[PATH_MAX]; boot_prefix[i] = strdup(realpath(argv[i], rp) ? rp : argv[i]); }
     if (dev) {
         snprintf(exe, sizeof exe, "%s", argv[1]);
+        // the game's own exe from its folder (a Steam Play launch passes it): the bundled image replaces it, as in
+        // a normal app launch; any other exe (e.g. a dev build's orig.exe) is loaded as given
+        const char *base = strrchr(argv[1], '/'); base = base ? base + 1 : argv[1];
+        if (!strcasecmp(base, rt_game.exe)) bundled_image(argv[0], exe, sizeof exe);
         dir = argv[2];
         gargc = argc - 2; gargv = argv + 2;
     } else {
@@ -157,14 +174,7 @@ int main(int argc, char **argv) {
         if (!d) return 0;   // picker cancelled
         dir = d;
         snprintf(exe, sizeof exe, "%s/%s", d, rt_game.exe);
-        if (rt_game.image) {   // <app>/Contents/MacOS/<binary> -> <app>/Contents/Resources/<image>
-            char self[PATH_MAX], res[PATH_MAX + 64];
-            if (realpath(argv[0], self)) {
-                char *slash = strrchr(self, '/'); if (slash) *slash = 0;
-                snprintf(res, sizeof res, "%s/../Resources/%s", self, rt_game.image);
-                if (access(res, R_OK) == 0) snprintf(exe, sizeof exe, "%s", res);
-            }
-        }
+        bundled_image(argv[0], exe, sizeof exe);
         // game arguments: everything except macOS launch noise (-psn_..., -NSDocumentRevisionsDebugMode ...)
         gargv = calloc((size_t)argc + 1, sizeof *gargv); gargc = 0;
         gargv[gargc++] = argv[0];

@@ -69,6 +69,7 @@ typedef struct Drawable {
     IOSurfaceRef surf[NSURF]; GLuint tex[NSURF]; GLuint depth;
     int cur; uint32_t gen;
     void *layer;
+    int layer_w, layer_h;                 // the drawable size last set on the layer
 } Drawable;
 
 typedef struct GLCtx {
@@ -166,7 +167,8 @@ static void present(Drawable *d, int s) {
         CAMetalLayer *L = (__bridge CAMetalLayer *)d->layer;
         if (!L) return;
         if (L.device != mtl_dev) { L.device = mtl_dev; L.pixelFormat = MTLPixelFormatBGRA8Unorm; L.framebufferOnly = YES; L.opaque = YES; }
-        if (L.drawableSize.width != d->w || L.drawableSize.height != d->h) L.drawableSize = CGSizeMake(d->w, d->h);
+        // only when our size changes: an injected overlay or scaler may resize the drawable itself
+        if (d->layer_w != d->w || d->layer_h != d->h) { L.drawableSize = CGSizeMake(d->w, d->h); d->layer_w = d->w; d->layer_h = d->h; }
         L.displaySyncEnabled = swap_interval != 0;
         id<CAMetalDrawable> dr = [L nextDrawable];
         if (!dr) return;
