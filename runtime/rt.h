@@ -62,4 +62,5 @@ void rt_register_module_tls(const GModule *m, uint64_t start, uint64_t end, uint
 void rt_module_tls_attach(const GModule *m);
 char *rt_module_file(const GModule *m, const char *win);   // rt.c: $RT_MODULE_DIR/<name>.dll, else win mapped to the host
 uint64_t rt_module_export(uint64_t base, uint64_t name);
+const char *rt_guest_env(const char *name);   // kernel32.c: the guest environment (Windows variables + DXVK_/MESA_ passthrough)
 char *rt_host_path(const char *win);   // files.c: guest path -> malloc'd host path, or NULL

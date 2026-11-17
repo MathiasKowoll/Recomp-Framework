@@ -2,6 +2,7 @@
 // (the Vulkan surface), and AppKit events translated into Win32 messages for window.c.
 #import <AppKit/AppKit.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <time.h>
 #include <stdatomic.h>
 #include <pthread.h>
 #include "cocoa.h"
@@ -40,6 +41,8 @@ static double primary_h(void) { double h = CGDisplayBounds(CGMainDisplayID()).si
 // After ChangeDisplaySettings(W x H) the primary screen is emulated at W x H: k scales that mode onto the
 // real screen keeping its aspect ratio, and the offset centres it (black bars fill the rest).
 static int g_vw, g_vh;   // emulated mode of the primary display (0 = native)
+static NSCursor *g_cur;   // the guest's custom cursor (SetCursor), nil = the system arrow
+static BOOL g_cur_blank;  // SetCursor(NULL): no cursor image
 static double primary_w(void) { double w = CGDisplayBounds(CGMainDisplayID()).size.width; return w > 0 ? w : 1920; }
 static void xform(double *k, double *ox, double *oy) {
     if (!g_vw || !g_vh) { *k = 1.0 / g_scale; *ox = *oy = 0; return; }
@@ -102,6 +105,10 @@ static void app_init(void) {   // main thread
 - (CALayer *)makeBackingLayer { CAMetalLayer *l = [CAMetalLayer layer]; l.contentsScale = px_per_pt(); return l; }   // drawable = guest pixels
 - (void)viewDidChangeBackingProperties { self.layer.contentsScale = px_per_pt(); }
 - (BOOL)isFlipped { return YES; }
+// The guest's cursor (SetCursor) as this view's cursor rect: AppKit re-applies a view's cursor whenever the mouse
+// enters or moves in it, and would otherwise put the arrow back over our [NSCursor set].
+- (void)resetCursorRects { [self addCursorRect:self.bounds cursor:(g_cur ?: [NSCursor arrowCursor])]; }
+- (void)cursorUpdate:(NSEvent *)e { [(g_cur ?: [NSCursor arrowCursor]) set]; }
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)acceptsFirstMouse:(NSEvent *)e { return YES; }
 
@@ -135,6 +142,11 @@ static uint64_t mk_flags(NSEvent *e) {
     int dx = (int)lround(e.deltaX * g_scale), dy = (int)lround(e.deltaY * g_scale);
     atomic_fetch_add(&g_dx, dx); atomic_fetch_add(&g_dy, dy);
     di_mouse_move(dx, dy);
+    if (g_cur) [g_cur set];   // AppKit may have put the arrow back (window edges, other apps)
+    // Windows sends WM_SETCURSOR(hwnd, HTCLIENT | WM_MOUSEMOVE << 16) before each mouse move; UE4 picks and sets
+    // its cursor in response. Sent at most every 50 ms so moves still coalesce in the queue.
+    static uint64_t last_sc; uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (now - last_sc > 50000000ull) { last_sc = now; win_from_cocoa(self.hwnd, 0x20, self.hwnd, 1 | (uint64_t)WM_MOUSEMOVE << 16); }
     win_from_cocoa(self.hwnd, WM_MOUSEMOVE, mk_flags(e), [self clientPos:e]);
 }
 - (void)mouseMoved:(NSEvent *)e { [self moved:e]; }
@@ -363,6 +375,45 @@ void cocoa_set_cursor_pos(int x, int y) {
     CGAssociateMouseAndMouseCursorPosition(true);   // no input freeze after the warp
 }
 void cocoa_cursor_visible(int v) { on_main(^{ if (v) [NSCursor unhide]; else [NSCursor hide]; }); }
+// Custom cursors (CreateIconIndirect): an NSCursor from a 32-bit BGRA image (straight alpha, top row first),
+// sized so one cursor pixel covers one guest pixel. SetCursor shows it; SetCursor(NULL) shows no image.
+static NSCursor *blank_cursor(void) {
+    static NSCursor *b;
+    if (!b) { NSImage *img = [[NSImage alloc] initWithSize:NSMakeSize(1, 1)]; b = [[NSCursor alloc] initWithImage:img hotSpot:NSZeroPoint]; }
+    return b;
+}
+void *cocoa_cursor_new(const uint8_t *bgra, int w, int h, int hx, int hy) {
+    __block void *res = NULL;
+    on_main(^{
+        NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:w pixelsHigh:h bitsPerSample:8
+            samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace
+            bitmapFormat:NSBitmapFormatAlphaNonpremultiplied bytesPerRow:w * 4 bitsPerPixel:32];
+        if (!rep) return;
+        uint8_t *d = rep.bitmapData;
+        for (int i = 0; i < w * h; i++) { d[4 * i] = bgra[4 * i + 2]; d[4 * i + 1] = bgra[4 * i + 1]; d[4 * i + 2] = bgra[4 * i]; d[4 * i + 3] = bgra[4 * i + 3]; }
+        double s = px_per_pt();   // guest pixels per point
+        NSImage *img = [[NSImage alloc] initWithSize:NSMakeSize(w / s, h / s)];
+        [img addRepresentation:rep];
+        NSCursor *cur = [[NSCursor alloc] initWithImage:img hotSpot:NSMakePoint(hx / s, hy / s)];
+        res = (__bridge_retained void *)cur;
+    });
+    return res;
+}
+void cocoa_cursor_free(void *c) {
+    if (!c) return;
+    on_main(^{
+        NSCursor *x = (__bridge_transfer NSCursor *)c;
+        if (g_cur == x) { g_cur = nil; [[NSCursor arrowCursor] set]; }
+    });
+}
+void cocoa_cursor_set(void *c, int blank) {
+    on_main(^{
+        g_cur = blank ? blank_cursor() : (__bridge NSCursor *)c;
+        for (NSWindow *nw in NSApp.windows)   // re-register every game view's cursor rect with the new cursor
+            if ([nw isKindOfClass:[RTWindow class]]) [nw invalidateCursorRectsForView:((RTWindow *)nw).view];
+        [(g_cur ?: [NSCursor arrowCursor]) set];
+    });
+}
 void cocoa_mouse_delta(int *dx, int *dy) { *dx = atomic_exchange(&g_dx, 0); *dy = atomic_exchange(&g_dy, 0); }
 
 // Emulated display mode for the primary screen (ChangeDisplaySettings); 0 x 0 restores the native mode.

@@ -582,9 +582,24 @@ void I_user32_dll_GetWindowPlacement(CPU *c) {
     int mn = 0, zm = 0, vis = !!(w->style & WS_VISIBLE);
     if (w->ns) cocoa_window_state(w->ns, &mn, &zm, &vis);
     uint64_t p = A1; memset(PTR(p + 4), 0, 40);
-    wr32(p + 8, mn ? 2 : zm ? 3 : vis ? 1 : 0);
+    wr32(p + 8, mn ? 2 : zm ? 3 : 1);   // showCmd describes the restored state, not visibility: SW_SHOWNORMAL even while hidden (UE4 hides, reads, then restores the placement)
     int32_t x, y; client_origin(w, &x, &y); int l, t, r, b; insets(w, &l, &t, &r, &b);
     put_rect(p + 28, x - l, y - t, x + w->cw + r, y + w->ch + b);
+    RET(1);
+}
+// GetWindowInfo(hwnd, WINDOWINFO*): rcWindow, rcClient, style, exstyle, status (1 = active), border sizes, atom, version.
+// UE4 reads it before every window-mode change; an unfilled struct put the window off screen.
+void I_user32_dll_GetWindowInfo(CPU *c) {
+    Win *w = win_get(A0); uint64_t o = A1;
+    if (!w || !o || rd32(o) < 60) { set_last_error(1400); RET(0); return; }
+    sync_rect(w);
+    int l, t, r, b; insets(w, &l, &t, &r, &b);
+    int32_t cx = w->x, cy = w->y;
+    for (Win *q = w; q && !toplevel(q); ) { q = win_get(q->parent); if (q) { cx += q->x; cy += q->y; } }   // child: client -> screen
+    wr32(o + 4, (uint32_t)(cx - l)); wr32(o + 8, (uint32_t)(cy - t)); wr32(o + 12, (uint32_t)(cx + w->cw + r)); wr32(o + 16, (uint32_t)(cy + w->ch + b));
+    wr32(o + 20, (uint32_t)cx); wr32(o + 24, (uint32_t)cy); wr32(o + 28, (uint32_t)(cx + w->cw)); wr32(o + 32, (uint32_t)(cy + w->ch));
+    wr32(o + 36, w->style); wr32(o + 40, w->exstyle); wr32(o + 44, g_active == w->hwnd ? 1 : 0);
+    wr32(o + 48, (uint32_t)l); wr32(o + 52, (uint32_t)t); wr16(o + 56, 0); wr16(o + 58, 0x0500);
     RET(1);
 }
 void I_user32_dll_SetWindowPlacement(CPU *c) {
@@ -834,7 +849,13 @@ void I_user32_dll_ShowOwnedPopups(CPU *c) { RET(1); }
 
 // ---------------- cursor ----------------
 static int cursor_count;
-void I_user32_dll_SetCursor(CPU *c) { uint64_t prev = g_cursor; g_cursor = A0; RET(prev); }
+void *rt_cursor_native(uint64_t h);   // user32.c
+// SetCursor(h): a custom cursor (CreateIconIndirect) shows its image; a system cursor the arrow; NULL no image
+void I_user32_dll_SetCursor(CPU *c) {
+    uint64_t prev = g_cursor; g_cursor = A0;
+    if (A0 != prev) cocoa_cursor_set(rt_cursor_native(A0), A0 == 0);
+    RET(prev);
+}
 void I_user32_dll_GetCursor(CPU *c) { RET(g_cursor); }
 // ShowCursor(show) -> new display counter; the cursor is hidden while it is negative
 void I_user32_dll_ShowCursor(CPU *c) {

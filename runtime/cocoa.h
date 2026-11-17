@@ -31,6 +31,9 @@ void cocoa_pick_friends(int n, const char *const *names, const char *const *deta
 void cocoa_cursor_pos(int *x, int *y);
 void cocoa_set_cursor_pos(int x, int y);
 void cocoa_cursor_visible(int visible);
+void *cocoa_cursor_new(const uint8_t *bgra, int w, int h, int hx, int hy);   // custom cursor from a BGRA image (retained)
+void cocoa_cursor_free(void *cursor);
+void cocoa_cursor_set(void *cursor, int blank);   // NULL = system arrow; blank = no cursor image
 void cocoa_mouse_delta(int *dx, int *dy);      // raw motion accumulated since the last call, pixels
 
 // implemented by window.c; called on the main thread while cocoa_pump runs
