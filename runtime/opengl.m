@@ -26,6 +26,8 @@
 #import <IOSurface/IOSurface.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <CoreGraphics/CoreGraphics.h>
+#include <time.h>
 #include <pthread.h>
 #include <string.h>
 #include "rt.h"
@@ -90,7 +92,7 @@ static Drawable *drs[MAXDR];
 static CGLPixelFormatObj pix;
 static CGLContextObj share_root;
 static __thread uint64_t cur_dc;
-static int swap_interval = 1;
+static int swap_interval = 1;   // WGL: 0 off, n > 0 sync, n < 0 adaptive (WGL_EXT_swap_control_tear)
 static NSMutableArray *mtl_keep;          // MTLTextures of the drawables (index: drawable * NSURF + surface)
 static id<MTLDevice> mtl_dev;
 static id<MTLCommandQueue> mtl_queue;
@@ -160,6 +162,27 @@ static void mtl_init(void) {
 
 static int dr_index(Drawable *d) { for (int i = 0; i < MAXDR; i++) if (drs[i] == d) return i; return -1; }
 
+// Adaptive vsync (a negative swap interval, WGL_EXT_swap_control_tear): a frame that arrives within a refresh
+// period of the last one waits for the display as usual; a late one is shown at once instead of holding on to the
+// next refresh, so a game that just misses 60 doesn't fall to 30.
+static double refresh_period(void) {
+    static double period;
+    if (!period) {
+        double hz = 0;
+        CGDisplayModeRef m = CGDisplayCopyDisplayMode(CGMainDisplayID());
+        if (m) { hz = CGDisplayModeGetRefreshRate(m); CGDisplayModeRelease(m); }
+        period = 1.0 / (hz >= 24 && hz <= 500 ? hz : 60.0);
+    }
+    return period;
+}
+static int present_synced(void) {
+    if (swap_interval >= 0) return swap_interval != 0;
+    static double last;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    double now = (double)ts.tv_sec + ts.tv_nsec / 1e9, dt = now - last;
+    last = now;
+    return dt <= refresh_period() * 1.25;
+}
 static void present(Drawable *d, int s) {
     @autoreleasepool {
         if (!mtl_pipe) return;
@@ -169,7 +192,7 @@ static void present(Drawable *d, int s) {
         if (L.device != mtl_dev) { L.device = mtl_dev; L.pixelFormat = MTLPixelFormatBGRA8Unorm; L.framebufferOnly = YES; L.opaque = YES; }
         // only when our size changes: an injected overlay or scaler may resize the drawable itself
         if (d->layer_w != d->w || d->layer_h != d->h) { L.drawableSize = CGSizeMake(d->w, d->h); d->layer_w = d->w; d->layer_h = d->h; }
-        L.displaySyncEnabled = swap_interval != 0;
+        L.displaySyncEnabled = present_synced();
         id<CAMetalDrawable> dr = [L nextDrawable];
         if (!dr) return;
         id<MTLCommandBuffer> cb = [mtl_queue commandBuffer];
@@ -831,7 +854,8 @@ void I_opengl32_dll_wglSetPixelFormat(CPU *c) { RET(1); }
 void I_opengl32_dll_wglDescribePixelFormat(CPU *c) { I_gdi32_dll_DescribePixelFormat(c); }
 
 static const char wgl_exts[] = "WGL_ARB_extensions_string WGL_EXT_extensions_string WGL_ARB_pixel_format WGL_ARB_create_context "
-                               "WGL_ARB_create_context_profile WGL_EXT_swap_control WGL_ARB_framebuffer_sRGB WGL_EXT_framebuffer_sRGB";
+                               "WGL_ARB_create_context_profile WGL_EXT_swap_control WGL_EXT_swap_control_tear WGL_ARB_framebuffer_sRGB "
+                               "WGL_EXT_framebuffer_sRGB";
 static void wglGetExtensionsStringARB(CPU *c) { RET(G(wgl_exts)); }
 static void wglGetExtensionsStringEXT(CPU *c) { RET(G(wgl_exts)); }
 static int pf_attrib(int a) {
@@ -879,7 +903,12 @@ static void wglCreateContextAttribsARB(CPU *c) {
     rt_log("[gl] wglCreateContextAttribsARB(%d.%d, profile %d, flags 0x%x) -> 0x%llx (4.1 core)\n", maj, min, prof, flags, (unsigned long long)h);
     RET(h);
 }
-static void wglSwapIntervalEXT(CPU *c) { swap_interval = (int)A0; RET(1); }
+static void wglSwapIntervalEXT(CPU *c) {
+    int n = (int)A0;
+    if (n != swap_interval) rt_log("[gl] swap interval %d (%s)\n", n, n > 0 ? "vsync" : n < 0 ? "adaptive vsync" : "off");
+    swap_interval = n;
+    RET(1);
+}
 static void wglGetSwapIntervalEXT(CPU *c) { RET(swap_interval); }
 
 static const struct { const char *name; gfn fn; } wgl_procs[] = {
