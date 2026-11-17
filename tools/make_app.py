@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Package the recompiled game as a macOS app bundle.
 
-usage: make_app.py BINARY GAME_EXE OUT.app [--name NAME] [--bundle-id ID] [--category UTI] [--version V]
+usage: make_app.py BINARY GAME_EXE OUT.app [--name NAME] [--display-name NAME] [--bundle-id ID] [--category UTI]
+                   [--version V]
                    [--resource FILE[=NAME]]... [--no-vulkan]
   BINARY    the linked runtime + recompiled game (build/boot)
   GAME_EXE  the original Windows executable, used only for its icon
-  --name    app and executable name (default: OUT.app's name)
+  --name    executable name (default: OUT.app's name)
+  --display-name  the name shown in the menu bar, Dock and app switcher (default: --name); may contain characters a
+                  file name can't, e.g. a colon, while OUT.app keeps a plain file name
   --resource  copy FILE into Contents/Resources (as NAME), e.g. the image named by rt_game.image
   --no-vulkan an OpenGL game: no Vulkan driver in the bundle
 The app finds the game folder itself on launch (see runtime/boot.c), so no game data goes in the bundle.
@@ -18,6 +21,7 @@ def opt(flag, default):
         i = args.index(flag); v = args[i + 1]; del args[i:i + 2]; return v
     return default
 app_name = opt("--name", None)
+display_name = opt("--display-name", None)
 bundle_id = opt("--bundle-id", None)
 category = opt("--category", "public.app-category.games")
 version = opt("--version", "0.1")
@@ -28,6 +32,7 @@ no_vulkan = "--no-vulkan" in args
 if no_vulkan: args.remove("--no-vulkan")
 binary, game_exe, app = args[0], args[1], args[2]
 app_name = app_name or os.path.splitext(os.path.basename(app.rstrip("/")))[0]
+display_name = display_name or app_name
 bundle_id = bundle_id or "com.example." + "".join(ch for ch in app_name.lower() if ch.isalnum()) + "-recomp"
 here = os.path.dirname(os.path.abspath(__file__))
 contents = os.path.join(app, "Contents")
@@ -65,8 +70,8 @@ else:
 
 with open(os.path.join(contents, "Info.plist"), "wb") as f:
     plistlib.dump({
-        "CFBundleName": app_name,
-        "CFBundleDisplayName": app_name,
+        "CFBundleName": display_name,
+        "CFBundleDisplayName": display_name,
         "CFBundleExecutable": app_name,
         "CFBundleIdentifier": bundle_id,
         "CFBundleIconFile": app_name,
