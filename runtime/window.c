@@ -517,7 +517,16 @@ static int set_window_pos(CPU *c, uint64_t h, uint64_t after, int32_t x, int32_t
     int32_t nx = (fl & 2) ? w->x : x + l, ny = (fl & 2) ? w->y : y + t;
     int32_t ncw = (fl & 1) ? w->cw : cx - l - r, nch = (fl & 1) ? w->ch : cy - t - b;
     if (!toplevel(w)) { w->x = nx; w->y = ny; w->cw = ncw; w->ch = nch; }
-    else if (w->ns && (!(fl & 1) || !(fl & 2) || (fl & 0x20))) cocoa_window_set_client(w->ns, nx, ny, ncw > 0 ? ncw : 1, nch > 0 ? nch : 1);
+    else if (w->ns && (!(fl & 1) || !(fl & 2) || (fl & 0x20))) {
+        int32_t ox = w->x, oy = w->y, ow = w->cw, oh = w->ch;
+        cocoa_window_set_client(w->ns, nx, ny, ncw > 0 ? ncw : 1, nch > 0 ? nch : 1);
+        // The new rect, now, as Windows reports it from inside SetWindowPos: Cocoa's resize notification never
+        // comes when the Mac window keeps its size, e.g. a fullscreen window going from one emulated display
+        // mode to another of the same aspect (it covers the screen either way; only the scale changes)
+        sync_rect(w);
+        if (w->cw != ow || w->ch != oh) send_msg(c, w->hwnd, WM_SIZE, 0, (uint64_t)(uint16_t)w->cw | (uint64_t)(uint16_t)w->ch << 16);
+        if (w->x != ox || w->y != oy) send_msg(c, w->hwnd, WM_MOVE, 0, (uint64_t)(uint16_t)w->x | (uint64_t)(uint16_t)w->y << 16);
+    }
     if (!toplevel(w) && !(fl & 1)) send_msg(c, w->hwnd, WM_SIZE, 0, (uint64_t)(uint16_t)ncw | (uint64_t)(uint16_t)nch << 16);
     if (fl & 0x40) apply_show(c, w, (fl & 0x10) ? 8 : 5);         // SHOWWINDOW (NOACTIVATE -> SHOWNA)
     else if (fl & 0x80) apply_show(c, w, 0);                       // HIDEWINDOW
