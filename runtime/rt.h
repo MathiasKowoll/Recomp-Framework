@@ -40,6 +40,7 @@ void teb_init(CPU *c);
 CPU *rt_cur(void);
 void rt_set_cur(CPU *c);
 uint32_t rt_thread_id(void);
+void rt_longjmp(CPU *c, uint64_t buf, uint32_t value);   // setjmp.c: longjmp for translated code (rt_setjmp_site)
 
 // UTF-16 helpers (Windows wide strings)
 size_t w16len(const uint16_t *s);
@@ -57,5 +58,8 @@ const GModule *rt_find_module(const char *base_name);
 int rt_module_loaded(const GModule *m);
 const GModule *rt_module_at(uint64_t a);
 int rt_load_module(const GModule *m, const char *host_path);
+void rt_register_module_tls(const GModule *m, uint64_t start, uint64_t end, uint64_t index, uint32_t zero);   // teb.c
+void rt_module_tls_attach(const GModule *m);
+char *rt_module_file(const GModule *m, const char *win);   // rt.c: $RT_MODULE_DIR/<name>.dll, else win mapped to the host
 uint64_t rt_module_export(uint64_t base, uint64_t name);
 char *rt_host_path(const char *win);   // files.c: guest path -> malloc'd host path, or NULL

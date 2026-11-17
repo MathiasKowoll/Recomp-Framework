@@ -18,6 +18,9 @@
 static uint8_t *peb;
 static __thread CPU *cur;
 static uint32_t next_tid = 0x100;
+#define TLS_MODULES 64    // entries of each thread's ThreadLocalStoragePointer array
+static pthread_mutex_t modtls_mu = PTHREAD_MUTEX_INITIALIZER;
+static void tls_add_thread(uint64_t *arr);
 
 CPU *rt_cur(void) { return cur; }
 void rt_set_cur(CPU *c) { cur = c; }
@@ -43,14 +46,57 @@ void teb_init(CPU *c) {
     wr64(t + TEB_PEB, G(peb));
     wr64(t + TEB_PID, 0x1000);
     wr64(t + TEB_TID, __atomic_fetch_add(&next_tid, 4, __ATOMIC_SEQ_CST));
-    // static TLS (.tls template), module index 0
+    // static TLS (.tls template): the exe is module index 0; translated DLLs get 1, 2, ... when they load
     uint64_t n = gtls_end - gtls_start;
     uint8_t *blk = calloc(1, n + 64);
     if (n) memcpy(blk, PTR(gtls_start), n);
-    uint64_t *arr = calloc(4, sizeof(uint64_t));
+    uint64_t *arr = calloc(TLS_MODULES, sizeof(uint64_t));
     arr[0] = G(blk);
     wr64(t + TEB_TLSPTR, G(arr));
     if (gtls_index) wr32(gtls_index, 0);
+    tls_add_thread(arr);
+}
+
+// ---------------- static TLS of translated DLLs ----------------
+// The Windows loader gives each module with a .tls directory an index (written to its _tls_index) and puts a
+// copy of its template in ThreadLocalStoragePointer[index] of every thread, including threads that already
+// exist when the DLL is loaded. MSVC's thread-safe statics depend on it: their per-thread epoch lives there.
+typedef struct { const GModule *m; uint64_t start, end, index; uint32_t zero; uint32_t slot; } ModTls;
+static ModTls modtls[32]; static int nmodtls;
+static uint64_t **thread_arrs; static int nthread_arrs, cap_thread_arrs;
+static uint32_t next_tls_slot = 1;
+static uint64_t tls_block(const ModTls *m) {
+    uint64_t n = m->end - m->start;
+    uint8_t *b = calloc(1, n + m->zero + 64);
+    if (n) memcpy(b, PTR(m->start), n);
+    return G(b);
+}
+static void tls_add_thread(uint64_t *arr) {
+    pthread_mutex_lock(&modtls_mu);
+    for (int i = 0; i < nmodtls; i++) if (modtls[i].slot) arr[modtls[i].slot] = tls_block(&modtls[i]);
+    if (nthread_arrs == cap_thread_arrs) { cap_thread_arrs = cap_thread_arrs ? cap_thread_arrs * 2 : 256; thread_arrs = realloc(thread_arrs, (size_t)cap_thread_arrs * sizeof *thread_arrs); }
+    thread_arrs[nthread_arrs++] = arr;
+    pthread_mutex_unlock(&modtls_mu);
+}
+// called at startup by the module's generated tables.c
+void rt_register_module_tls(const GModule *m, uint64_t start, uint64_t end, uint64_t index, uint32_t zero) {
+    pthread_mutex_lock(&modtls_mu);
+    if (nmodtls < 32) modtls[nmodtls++] = (ModTls){ m, start, end, index, zero, 0 };
+    pthread_mutex_unlock(&modtls_mu);
+}
+// called by the loader once the module image is mapped and relocated, before its DllMain
+void rt_module_tls_attach(const GModule *m) {
+    pthread_mutex_lock(&modtls_mu);
+    for (int i = 0; i < nmodtls; i++) {
+        ModTls *t = &modtls[i];
+        if (t->m != m || t->slot) continue;
+        if (next_tls_slot >= TLS_MODULES) { rt_log("[rt] %s: out of TLS module slots\n", m->name); break; }
+        t->slot = next_tls_slot++;
+        wr32(t->index, t->slot);
+        for (int k = 0; k < nthread_arrs; k++) thread_arrs[k][t->slot] = tls_block(t);
+        rt_log("[rt] %s: TLS index %u (%llu bytes, %d threads)\n", m->name, t->slot, (unsigned long long)(t->end - t->start), nthread_arrs);
+    }
+    pthread_mutex_unlock(&modtls_mu);
 }
 
 // TlsAlloc / TlsGetValue / TlsSetValue: slots live in each TEB

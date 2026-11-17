@@ -599,7 +599,7 @@ static uint64_t real_module(CPU *c, const char *name, int load) {
     int has_dir = strchr(name, '\\') || strchr(name, '/') || strchr(name, ':');
     const char *dot = strrchr(name, '.');
     snprintf(win, sizeof win, "%s%s%s%s", has_dir ? "" : rt_game.win_dir, has_dir ? "" : "\\", name, dot && !strpbrk(dot, "\\/") ? "" : ".dll");
-    char *host = rt_host_path(win);
+    char *host = rt_module_file(m, win);
     int ok = host && rt_load_module(m, host);
     free(host);
     if (!ok) { set_last_error(126); return 0; }

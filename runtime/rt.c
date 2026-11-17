@@ -1,5 +1,6 @@
 // Runtime core: guest image, dispatch, host-function thunks, CPU helpers, guest calls.
 #include "rt.h"
+#include <limits.h>
 #include "game.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,10 +60,10 @@ static gfn find_in(const GFunc *f, int n, uint64_t a) {
     return NULL;
 }
 // translated DLLs (registered by their generated tables.c at startup)
-#define MAXMOD 8
+#define MAXMOD 64   // translated DLLs (was 8; a UE4 game with PhysX, APEX, audio and DXVK needs 14)
 static const GModule *modules[MAXMOD];
 static int nmodules, module_loaded[MAXMOD];
-void rt_register_module(const GModule *m) { if (nmodules < MAXMOD) modules[nmodules++] = m; }
+void rt_register_module(const GModule *m) { if (nmodules < MAXMOD) modules[nmodules++] = m; else fprintf(stderr, "[rt] too many translated DLLs: %s not registered (raise MAXMOD)\n", m->name); }
 // Direct lookup for 16-byte-aligned function addresses (nearly all of them): one load instead of a
 // binary search over ~144k entries on every indirect call. Read-only after startup.
 gfn *rt_fast_tab; uint64_t rt_fast_lo, rt_fast_n;   // covers .text only (~16 MB)
@@ -292,6 +293,7 @@ int rt_load_module(const GModule *m, const char *host_path) {
     fclose(f);
     for (int i = 0; i < m->nrelocs; i++) wr64(m->relocs[i], rd64(m->relocs[i]) + (uint64_t)m->delta);   // rebased image
     for (int i = 0; i < m->nimports; i++) wr64(m->imports[i].slot, rt_host_fn(m->imports[i].fn, m->imports[i].name));
+    rt_module_tls_attach(m);   // static TLS slot in every thread, before DllMain runs
     module_loaded[idx] = 1;
     rt_log("[rt] loaded %s at 0x%llx (%d functions)\n", m->name, (unsigned long long)m->base, m->nfuncs);
     return 1;
@@ -301,12 +303,22 @@ int rt_load_module(const GModule *m, const char *host_path) {
 // Calling convention: the caller pushed its return address and pops it after we return, and the
 // translated function pops it too at its `ret`, so the stack pointer is adjusted back afterwards.
 static pthread_mutex_t mod_mu = PTHREAD_MUTEX_INITIALIZER;
+// Host file behind a translated DLL: $RT_MODULE_DIR/<name>.dll when that exists (DLLs the game folder does not
+// have, e.g. a D3D11 implementation), else the guest path `win` mapped to the host. malloc'd, or NULL.
+char *rt_module_file(const GModule *m, const char *win) {
+    const char *dir = getenv("RT_MODULE_DIR");
+    if (dir && *dir) {
+        char p[PATH_MAX]; snprintf(p, sizeof p, "%s/%s.dll", dir, m->name);
+        if (access(p, R_OK) == 0) return strdup(p);
+    }
+    return win ? rt_host_path(win) : NULL;
+}
 void rt_module_call(CPU *c, const GModule *m, uint64_t addr) {
     if (!rt_module_loaded(m)) {
         pthread_mutex_lock(&mod_mu);
         if (!rt_module_loaded(m)) {
             char win[256]; snprintf(win, sizeof win, "%s\\%s.dll", rt_game.win_dir, m->name);
-            char *host = rt_host_path(win);
+            char *host = rt_module_file(m, win);
             CPU save = *c;   // DllMain runs on this CPU: keep the call's argument registers
             if (host && rt_load_module(m, host) && m->entry) {
                 uint64_t a[3] = { m->base, 1, 0 };
