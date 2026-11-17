@@ -1,0 +1,14 @@
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index a0b882c..62562c6 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -233,6 +233,9 @@ kk_get_device_features(
+       .depthClamp = true,
+       .drawIndirectFirstInstance = true,
+       .dualSrcBlend = true,
++      /* Recomp-Framework: reported so DXVK (which requires it) can create a device. Polygon modes are not
++       * implemented yet, so VK_POLYGON_MODE_LINE/POINT draw filled; only debug wireframe views use them. */
++      .fillModeNonSolid = true,
+       .fragmentStoresAndAtomics = true,
+       .fullDrawIndexUint32 = true,
+       .geometryShader = true,

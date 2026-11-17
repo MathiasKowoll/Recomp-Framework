@@ -1,0 +1,19 @@
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -986,6 +986,16 @@
+    STATIC_ASSERT(BLAKE3_KEY_LEN >= VK_UUID_SIZE);
+    memcpy(pdev->vk.properties.pipelineCacheUUID, blake3, VK_UUID_SIZE);
+    memcpy(pdev->vk.properties.shaderBinaryUUID, blake3, VK_UUID_SIZE);
++
++#ifdef ENABLE_SHADER_CACHE
++   /* On-disk shader cache (the common Vulkan pipeline cache stores serialized
++    * kk shaders in it), so shaders compiled in one run load in the next.
++    * Keyed by the driver build, so a rebuilt driver starts a fresh cache. */
++   char build_id[2 * VK_UUID_SIZE + 1];
++   for (unsigned i = 0; i < VK_UUID_SIZE; i++)
++      snprintf(build_id + 2 * i, 3, "%02x", instance->driver_build_sha[i]);
++   pdev->vk.disk_cache = disk_cache_create("kosmickrisp", build_id, 0);
++#endif
+ }
+ 
+ static void

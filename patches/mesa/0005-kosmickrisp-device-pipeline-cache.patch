@@ -1,0 +1,40 @@
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -314,6 +314,18 @@
+       dev->has_queue = true;
+    }
+ 
++   /* Device-internal pipeline cache, as the other Mesa drivers have: used
++    * when the app passes no VkPipelineCache, and backed by the physical
++    * device's on-disk shader cache. */
++   struct vk_pipeline_cache_create_info cache_info = {
++      .weak_ref = true,
++   };
++   dev->vk.mem_cache = vk_pipeline_cache_create(&dev->vk, &cache_info, NULL);
++   if (dev->vk.mem_cache == NULL) {
++      result = VK_ERROR_OUT_OF_HOST_MEMORY;
++      goto fail_mem_cache;
++   }
++
+    result = kk_device_init_meta(dev);
+    if (result != VK_SUCCESS)
+       goto fail_mem_cache;
+@@ -347,6 +359,8 @@
+ fail_meta:
+    kk_device_finish_meta(dev);
+ fail_mem_cache:
++   if (dev->vk.mem_cache)
++      vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+    if (dev->has_queue) {
+       kk_queue_finish(dev, &dev->queue);
+       dev->has_queue = false;
+@@ -392,6 +406,9 @@
+       dev->has_queue = false;
+    }
+ 
++   if (dev->vk.mem_cache)
++      vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
++
+    /* Release the residency set last once all BOs are released. */
+    mtl_release(dev->residency_set.handle);
+    simple_mtx_destroy(&dev->residency_set.mutex);
