@@ -11,9 +11,13 @@ Steam calls the tool's `run` launcher with the game's Windows exe and SteamAppId
 looks the app ID up in games.conf (next to it) and starts that game's .app. Adding a game is a config edit.
 
 NotProton plugins work too: a plugin in ~/Library/Application Support/notproton/plugins/*.conf that is switched on
-for the game (its NOTPROTON_<ID> launch option, set by NotProton's panel or typed into the launch options) is applied
-the way NotProton's own launcher applies it: `inject` loads its dylib into the game, its `env` lines are set, and
-NOTPROTON_ENV_<NAME>=value launch options set <NAME>. `depends`, `requires` and `tools` are honoured.
+for the game (NOTPROTON_<ID>=1 in the game's environment) is applied the way NotProton's own launcher applies it:
+`inject` loads its dylib into the game, its `env` lines are set, and NOTPROTON_ENV_<NAME>=value sets <NAME>.
+`depends`, `requires` and `tools` are honoured.
+
+A game's environment (plugin switches, runtime settings) goes in games.conf with `set-env`, not in Steam's launch
+options: Steam for Mac starts a game with launch options as `env VAR=value <tool>`, which fails ("OS Error 260")
+for compatibility tools other than NotProton's own.
 
 The overlay and plugin libraries are inserted with DYLD_INSERT_LIBRARIES, which macOS strips when it starts a system
 binary such as /bin/sh, so `run` is a small compiled launcher that execs the app directly. `install` needs clang
@@ -23,6 +27,7 @@ usage:
   nsr.py install [--display "NightSight Recomp (NSR)"]
   nsr.py add --appid 201810 --app /Applications/Game.app [--exe 'game*.exe'] [--pass-paths [--force-exe Game.exe]]
              [--name "Game"]
+  nsr.py set-env --appid 201810 [NAME=value ...]   (no values: clear)
   nsr.py remove --appid 201810
   nsr.py list
   nsr.py uninstall
@@ -38,7 +43,7 @@ usage:
                  (for a game that ships several exes where the port supports one)
 
 games.conf has one game per line, tab separated: appid, app executable, exe glob, force exe, pass-paths (yes/no),
-name. The launcher writes what each launch did to ~/Library/Logs/<tool id>.log.
+name, and optionally environment (space-separated NAME=value). The launcher writes what each launch did to ~/Library/Logs/<tool id>.log.
 Set NSR_TOOLS_DIR / NSR_STEAM_ROOT to use another compatibilitytools.d / Steam folder (for testing).
 Based on a community contributor's multi-game version of tools/steam_play_tool.py.
 """
@@ -97,7 +102,7 @@ static void alert(const char *msg) {
 }
 
 /* ---------------- games.conf ---------------- */
-static int lookup(const char *conf, const char *appid, char *bin, char *glob, char *force, char *mode, char *name) {
+static int lookup(const char *conf, const char *appid, char *bin, char *glob, char *force, char *mode, char *name, char *envs) {
     FILE *f = fopen(conf, "r");
     if (!f) return 0;
     char line[PATH_MAX * 3];
@@ -105,12 +110,13 @@ static int lookup(const char *conf, const char *appid, char *bin, char *glob, ch
     while (!found && fgets(line, sizeof line, f)) {
         line[strcspn(line, "\r\n")] = 0;
         if (!*line || *line == '#') continue;
-        char *fld[6] = { 0 }; int n = 0; char *p = line;
-        while (n < 6) { fld[n++] = p; char *t = strchr(p, '\t'); if (!t) break; *t = 0; p = t + 1; }
+        char *fld[7] = { 0 }; int n = 0; char *p = line;
+        while (n < 7) { fld[n++] = p; char *t = strchr(p, '\t'); if (!t) break; *t = 0; p = t + 1; }
         if (n < 5 || strcmp(fld[0], appid)) continue;
         snprintf(bin, PATH_MAX, "%s", fld[1]); snprintf(glob, PATH_MAX, "%s", fld[2]);
         snprintf(force, PATH_MAX, "%s", fld[3]); snprintf(mode, 16, "%s", fld[4]);
         snprintf(name, 256, "%s", n > 5 && fld[5] ? fld[5] : "");
+        snprintf(envs, PATH_MAX, "%s", n > 6 && fld[6] ? fld[6] : "");
         found = 1;
     }
     fclose(f);
@@ -296,8 +302,8 @@ int main(int argc, char **argv) {
     char self[PATH_MAX], conf[PATH_MAX];
     snprintf(self, sizeof self, "%s", argv[0]);
     snprintf(conf, sizeof conf, "%s/games.conf", dirname(self));
-    char bin[PATH_MAX], glob[PATH_MAX], force[PATH_MAX], mode[16], name[256];
-    if (!lookup(conf, appid, bin, glob, force, mode, name)) {
+    char bin[PATH_MAX], glob[PATH_MAX], force[PATH_MAX], mode[16], name[256], envs[PATH_MAX];
+    if (!lookup(conf, appid, bin, glob, force, mode, name, envs)) {
         lg("no games.conf entry for app %s (%s)", appid, conf);
         alert("This game is not set up in NightSight Recomp. Choose another compatibility tool for it in Steam, or add it with nsr.py add.");
         return 1;
@@ -319,6 +325,15 @@ int main(int argc, char **argv) {
     for (int i = 3; i < argc; i++) args[n++] = argv[i];
     args[n] = NULL;
 
+    /* the game's environment from games.conf (plugin switches, settings): before the plugins are evaluated */
+    for (char *t = strtok(envs, " "); t; t = strtok(NULL, " ")) {
+        char *eq = strchr(t, '=');
+        if (!eq || eq == t) continue;
+        *eq = 0;
+        if (!strncmp(t, "DYLD_", 5)) { lg("games.conf: %s refused (libraries come from the overlay and plugins)", t); continue; }
+        setenv(t, eq + 1, 1);
+        lg("games.conf: %s=%s", t, eq + 1);
+    }
     /* libraries for the game: what was already there, Steam's overlay, then switched-on NotProton plugins */
     char plugs[8192]; apply_plugins(plugs, sizeof plugs);
     char ins[16384] = "";
@@ -373,15 +388,15 @@ def read_conf(conf):
         for line in open(conf, encoding="utf-8"):
             line = line.rstrip("\r\n")
             if line and not line.startswith("#"):
-                rows.append((line.split("\t") + [""] * 6)[:6])
+                rows.append((line.split("\t") + [""] * 7)[:7])
     return rows
 
 
 def write_conf(conf, rows):
     with open(conf, "w", encoding="utf-8") as f:
-        f.write("# appid\tapp executable\texe glob\tforce exe\tpass-paths\tname\n")
+        f.write("# appid\tapp executable\texe glob\tforce exe\tpass-paths\tname\tenvironment\n")
         for r in sorted(rows, key=lambda r: int(r[0]) if r[0].isdigit() else 0):
-            f.write("\t".join(r) + "\n")
+            f.write("\t".join(r).rstrip("\t") + "\n")
 
 
 def cmd_install(a):
@@ -459,11 +474,35 @@ def cmd_add(a):
     for v in (binary, exe, force, name):
         if "\t" in v or "\n" in v:
             die("tabs and newlines are not allowed in values")
-    rows = [r for r in read_conf(conf) if r[0] != appid] + [[appid, binary, exe, force, mode, name]]
+    old = [r for r in read_conf(conf) if r[0] == appid]
+    envs = old[0][6] if old else ""   # re-adding a game keeps its environment
+    rows = [r for r in read_conf(conf) if r[0] != appid] + [[appid, binary, exe, force, mode, name, envs]]
     write_conf(conf, rows)
     print("%s (%s) -> %s, %s" % (name, appid, binary, "with the exe path and game folder" if mode == "yes" else "with the game's arguments"))
     print("in Steam: %s > Properties > Compatibility > Force the use of a specific Steam Play compatibility tool > %s"
           % (name, open(os.path.join(tool, "compatibilitytool.vdf")).read().split('"display_name" "')[1].split('"')[0]))
+
+
+def cmd_set_env(a):
+    tid, tool = tool_dir(a)
+    conf = os.path.join(tool, "games.conf")
+    appid = opt(a, "--appid")
+    vals = [v for v in a if "=" in v and not v.startswith("-")]
+    for v in vals:
+        n = v.split("=", 1)[0]
+        if not n or not (n[0].isalpha() or n[0] == "_") or not n.replace("_", "").isalnum():
+            die("not a NAME=value setting: %s" % v)
+        if n.startswith("DYLD_"):
+            die("%s: libraries come from Steam's overlay and NotProton plugins" % n)
+        if " " in v or "\t" in v:
+            die("no spaces or tabs in values: %s" % v)
+    rows = read_conf(conf)
+    hit = [r for r in rows if r[0] == appid]
+    if not hit:
+        die("app %s is not registered" % appid)
+    hit[0][6] = " ".join(vals)
+    write_conf(conf, rows)
+    print("%s (%s): %s" % (hit[0][5], appid, hit[0][6] or "no environment"))
 
 
 def cmd_remove(a):
@@ -481,7 +520,8 @@ def cmd_remove(a):
 def cmd_list(a):
     tid, tool = tool_dir(a)
     for r in read_conf(os.path.join(tool, "games.conf")):
-        print("%-8s %-28s %-11s exe=%s  force=%s\n         %s" % (r[0], r[5], "pass-paths" if r[4] == "yes" else "-", r[2], r[3] or "-", r[1]))
+        print("%-8s %-28s %-11s exe=%s  force=%s%s\n         %s" % (r[0], r[5], "pass-paths" if r[4] == "yes" else "-", r[2], r[3] or "-",
+                                                         "  env=" + r[6] if r[6] else "", r[1]))
 
 
 def cmd_uninstall(a):
@@ -490,7 +530,8 @@ def cmd_uninstall(a):
     print("removed", tool)
 
 
-COMMANDS = {"install": cmd_install, "add": cmd_add, "remove": cmd_remove, "list": cmd_list, "uninstall": cmd_uninstall}
+COMMANDS = {"install": cmd_install, "add": cmd_add, "set-env": cmd_set_env, "remove": cmd_remove, "list": cmd_list,
+            "uninstall": cmd_uninstall}
 
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:

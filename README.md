@@ -174,6 +174,10 @@ python3 tools/nsr.py list
   applied as NotProton's own launcher does: `inject` loads the plugin's dylib after Steam's overlay, `env` lines and
   `NOTPROTON_ENV_<NAME>` options set variables, and `depends`, `requires` and `tools` (the tool's name is `nsr`) are
   honoured.
+- A game's environment (plugin switches such as `NOTPROTON_<ID>=1`, runtime settings) is set with
+  `nsr.py set-env --appid <id> NAME=value ...` and kept in games.conf. Leave the game's Steam launch options empty:
+  Steam for Mac starts a launch with options as `env VAR=value <tool>`, which fails ("OS Error 260") for any
+  compatibility tool other than NotProton's own.
 - Each launch is logged to `~/Library/Logs/nsr.log`. Games live in `compatibilitytools.d/nsr/games.conf`, one line
   each.
 
