@@ -10,15 +10,19 @@ game's own library entry starts the native app on those files. Steam treats it a
 friends presence, invites, cloud saves and the Steam overlay. Steam passes its overlay libraries in
 STEAM_DYLD_INSERT_LIBRARIES; the launcher moves them into DYLD_INSERT_LIBRARIES for the game.
 
+A game whose Steam release is an old Mac version (one macOS can no longer run, such as a 32-bit build) works
+the same way with --mac-exe: the tool then declares that it runs Mac apps on macOS, so Steam keeps the Mac files,
+and the recompiled app is started on them.
+
 Without NotProton the folder is inert, and the game works as before.
 
 The overlay libraries have to be inserted with DYLD_INSERT_LIBRARIES, and macOS strips DYLD_* variables when it
 starts a system binary such as /bin/sh. So the tool's `run` entry point is a small compiled launcher that sets
-the variable and execs the app directly, not a shell script. It needs clang (Apple's Command Line Tools). Only Python's standard library is
-used, so the system Python can run this script.
+the variable and execs the app directly, not a shell script. It needs clang (Apple's Command Line Tools). Only
+Python's standard library is used, so the system Python can run this script.
 
 usage: steam_play_tool.py --app /Applications/Game.app --id game_recomp --display "Game Recomp"
-                          --exe 'game*.exe' [--force-exe Game.exe] [--remove]
+                          --exe 'game*.exe' [--force-exe Game.exe | --mac-exe Name] [--remove]
   --app        the recompiled game's .app (its Contents/MacOS executable is started)
   --id         the tool's internal name (letters, digits and _), also its folder name
   --display    the name shown in Steam's compatibility tool list
@@ -26,6 +30,8 @@ usage: steam_play_tool.py --app /Applications/Game.app --id game_recomp --displa
                first (redistributable installers and other helpers) finishes at once: there is nothing to
                install on macOS.
   --force-exe  always start this executable from the game folder, whichever launch option Steam picked
+  --mac-exe    the game's Steam release is a Mac app (--exe then matches its .app bundle's name): start the
+               recompiled app with <bundle>/Contents/MacOS/<Name> <bundle>/Contents/Resources
   --remove     unregister the tool
 """
 import os, shutil, subprocess, sys, tempfile
@@ -40,7 +46,7 @@ DECLARATION = '''"compatibilitytools"
     {
       "install_path" "."
       "display_name" "%(display)s"
-      "from_oslist" "windows"
+      "from_oslist" "%(from_os)s"
       "to_oslist" "macos"
     }
   }
@@ -66,7 +72,7 @@ LAUNCHER = r'''#include <fnmatch.h>
 
 extern char **environ;
 
-static const char *APP_BIN = "@BIN@", *EXE_GLOB = "@GLOB@", *FORCE_EXE = "@FORCE@";
+static const char *APP_BIN = "@BIN@", *EXE_GLOB = "@GLOB@", *FORCE_EXE = "@FORCE@", *MAC_EXE = "@MACEXE@";
 
 int main(int argc, char **argv) {
     if (argc < 2) return 0;
@@ -95,16 +101,29 @@ int main(int argc, char **argv) {
     snprintf(dir, sizeof dir, "%s", dirname(path));
     snprintf(path, sizeof path, "%s", argv[2]);
     snprintf(base, sizeof base, "%s", basename(path));
-    if (fnmatch(EXE_GLOB, base, FNM_CASEFOLD) != 0) return 0;   /* a helper Steam runs first */
-    if (*FORCE_EXE) snprintf(exe, sizeof exe, "%s/%s", dir, FORCE_EXE);
-    else snprintf(exe, sizeof exe, "%s", argv[2]);
+    if (*MAC_EXE) {   /* a Mac release: Steam passes its .app bundle, or a path inside it */
+        char bundle[PATH_MAX], *p;
+        snprintf(bundle, sizeof bundle, "%s", argv[2]);
+        if ((p = strstr(bundle, ".app/"))) p[4] = 0;
+        else if (strlen(bundle) < 4 || strcmp(bundle + strlen(bundle) - 4, ".app")) return 0;
+        snprintf(path, sizeof path, "%s", bundle);
+        snprintf(base, sizeof base, "%s", basename(path));
+        if (fnmatch(EXE_GLOB, base, FNM_CASEFOLD) != 0) return 0;
+        snprintf(exe, sizeof exe, "%s/Contents/MacOS/%s", bundle, MAC_EXE);
+        snprintf(dir, sizeof dir, "%s/Contents/Resources", bundle);
+    } else {
+        if (fnmatch(EXE_GLOB, base, FNM_CASEFOLD) != 0) return 0;   /* a helper Steam runs first */
+        if (*FORCE_EXE) snprintf(exe, sizeof exe, "%s/%s", dir, FORCE_EXE);
+        else snprintf(exe, sizeof exe, "%s", argv[2]);
+    }
     if (access(APP_BIN, X_OK) != 0) {
         execl("/usr/bin/osascript", "osascript", "-e",
               "display alert \"@DISPLAY@ is not installed\" message \"Install it again, or choose another "
               "compatibility tool for this game in Steam.\"", (char *)NULL);
         return 1;
     }
-    /* the app's command line: <Windows executable> <game folder> [game arguments] */
+    /* the app's command line: <Windows executable> <game folder> [game arguments], or for a Mac release
+     * <executable in the bundle> <bundle's Resources> [game arguments] */
     char *args[argc + 2];
     int n = 0;
     args[n++] = (char *)APP_BIN;
@@ -147,7 +166,7 @@ def main():
         print("removed", tool)
         return 0
     app = os.path.abspath(opt("--app", ""))
-    display, glob, force = opt("--display", tool_id), opt("--exe"), opt("--force-exe", "")
+    display, glob, force, mac_exe = opt("--display", tool_id), opt("--exe"), opt("--force-exe", ""), opt("--mac-exe", "")
     if not glob:
         sys.exit("--exe is required")
     macos = os.path.join(app, "Contents", "MacOS")
@@ -156,7 +175,7 @@ def main():
         sys.exit("no executable in %s" % macos)
     binary = os.path.join(macos, names[0])
     src = (LAUNCHER.replace("@BIN@", c_str(binary)).replace("@GLOB@", c_str(glob))
-           .replace("@FORCE@", c_str(force)).replace("@ID@", tool_id).replace("@DISPLAY@", c_str(display).replace('\\"', "")))
+           .replace("@FORCE@", c_str(force)).replace("@MACEXE@", c_str(mac_exe)).replace("@ID@", tool_id).replace("@DISPLAY@", c_str(display).replace('\\"', "")))
     os.makedirs(tool, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         c = os.path.join(tmp, "run.c")
@@ -167,7 +186,7 @@ def main():
             shutil.rmtree(tool, ignore_errors=True)
             sys.exit("clang failed:\n" + r.stderr)
         shutil.copy2(out, os.path.join(tool, "run"))
-    open(os.path.join(tool, "compatibilitytool.vdf"), "w").write(DECLARATION % {"id": tool_id, "display": display})
+    open(os.path.join(tool, "compatibilitytool.vdf"), "w").write(DECLARATION % {"id": tool_id, "display": display, "from_os": "macos" if mac_exe else "windows"})
     open(os.path.join(tool, "toolmanifest.vdf"), "w").write(MANIFEST)
     print("registered %s (runs %s)" % (tool, binary))
     return 0

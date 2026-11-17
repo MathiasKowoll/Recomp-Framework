@@ -325,14 +325,15 @@ int main(int argc, const char **argv) {
         const char *bin = argc > 2 && argv[1][0] != '-' ? argv[1] : NULL;
         const char *res = argc > 2 && argv[1][0] != '-' ? argv[2] : NULL;
         static char binbuf[2048];
+        // Not started from a terminal (Finder, or Steam through a compatibility tool): log to ~/Library/Logs.
+        if (!isatty(2)) {
+            NSString *log = [NSHomeDirectory() stringByAppendingPathComponent:
+                [NSString stringWithFormat:@"Library/Logs/%s.log", rt32_game.log_name ? rt32_game.log_name : "recomp32"]];
+            freopen(log.UTF8String, "w", stderr); freopen(log.UTF8String, "a", stdout);
+            setvbuf(stdout, NULL, _IONBF, 0); setvbuf(stderr, NULL, _IONBF, 0);   // a freeze must not lose the last lines
+        }
         if (!bin || !res) {
-            // Launched as an app: log to ~/Library/Logs and locate the user's copy of the game.
-            if (!isatty(2)) {
-                NSString *log = [NSHomeDirectory() stringByAppendingPathComponent:
-                    [NSString stringWithFormat:@"Library/Logs/%s.log", rt32_game.log_name ? rt32_game.log_name : "recomp32"]];
-                freopen(log.UTF8String, "w", stderr); freopen(log.UTF8String, "a", stdout);
-                setvbuf(stdout, NULL, _IONBF, 0); setvbuf(stderr, NULL, _IONBF, 0);   // a freeze must not lose the last lines
-            }
+            // Launched as an app: locate the user's copy of the game.
             NSString *game = find_game();
             if (!game) return 1;
             snprintf(binbuf, sizeof binbuf, "%s", bundle_exe(game).UTF8String);
