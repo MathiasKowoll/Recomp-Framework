@@ -342,6 +342,8 @@ void win_from_cocoa(uint64_t h, uint32_t msg, uint64_t wp, uint64_t lp) {
 }
 
 // ---------------- DefWindowProc ----------------
+void *rt_cursor_native(uint64_t h);   // user32.c
+static void apply_cursor(uint64_t h);
 static void destroy_window(CPU *c, uint64_t h);
 struct Win; static void apply_show(CPU *c, struct Win *w, int cmd);
 static uint64_t def_proc(CPU *c, uint64_t h, uint32_t msg, uint64_t wp, uint64_t lp, int wide) {
@@ -359,6 +361,9 @@ static uint64_t def_proc(CPU *c, uint64_t h, uint32_t msg, uint64_t wp, uint64_t
         }
     case WM_SYSKEYDOWN: if (wp == 0x73 && (lp & (1u << 29))) send_msg(c, h, WM_SYSCOMMAND, 0xF060, 0); return 0;   // Alt+F4
     case WM_NCHITTEST: return 1;           // HTCLIENT
+    // over the client area, Windows puts the class cursor back (if the class has one) on every mouse move:
+    // a game that hid the cursor with SetCursor(NULL) and leaves WM_SETCURSOR to DefWindowProc gets it back
+    case WM_SETCURSOR: if ((lp & 0xFFFF) == 1 && w && w->cls && w->cls->cursor) apply_cursor(w->cls->cursor); return 0;
     case WM_NCACTIVATE: return 1;
     case WM_MOUSEACTIVATE: return 1;       // MA_ACTIVATE
     case WM_ERASEBKGND: return 1;
@@ -851,9 +856,15 @@ void I_user32_dll_ShowOwnedPopups(CPU *c) { RET(1); }
 static int cursor_count;
 void *rt_cursor_native(uint64_t h);   // user32.c
 // SetCursor(h): a custom cursor (CreateIconIndirect) shows its image; a system cursor the arrow; NULL no image
+// the on-screen cursor: a custom one (CreateIconIndirect) shows its image; a system cursor the arrow; NULL none
+static void apply_cursor(uint64_t h) {
+    if (h == g_cursor) return;
+    g_cursor = h;
+    cocoa_cursor_set(rt_cursor_native(h), h == 0);
+}
 void I_user32_dll_SetCursor(CPU *c) {
-    uint64_t prev = g_cursor; g_cursor = A0;
-    if (A0 != prev) cocoa_cursor_set(rt_cursor_native(A0), A0 == 0);
+    uint64_t prev = g_cursor;
+    apply_cursor(A0);
     RET(prev);
 }
 void I_user32_dll_GetCursor(CPU *c) { RET(g_cursor); }
