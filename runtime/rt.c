@@ -256,8 +256,10 @@ void rt_load_image(const char *path) {
 }
 
 // ---------------- translated DLLs ----------------
-// DLL images live in a second zero-fill segment (-segaddr __GUESTDLL 0x180000000), the usual 64-bit DLL base.
-#define DLL_SEGMENT_BASE 0x180000000ull
+// DLL images live in a second zero-fill segment (-segaddr __GUESTDLL 0x160000000). Not at 0x180000000, the usual
+// 64-bit DLL base: on arm64 that is where the system's shared cache maps, and on macOS 26.7 a segment there
+// keeps the cache from loading at all. DLLs are translated rebased into this range (--rebase).
+#define DLL_SEGMENT_BASE 0x160000000ull
 #define DLL_SEGMENT_SIZE 0x4000000ull
 __asm__(".zerofill __GUESTDLL,__images,_rt_dll_segment," "0x4000000" ",14");
 extern char rt_dll_segment[];

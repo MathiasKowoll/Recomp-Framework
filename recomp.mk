@@ -89,8 +89,8 @@ $(BUILD)/game/%.o: %.c $(FW_HDR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # The guest image range is reserved inside the executable as zero-fill segments (rt.c): the exe at its
-# preferred base 0x140000000, translated DLLs at 0x180000000.
-LDFLAGS ?= $(ARCH) -Wl,-export_dynamic -Wl,-segaddr,__GUEST,0x140000000 -Wl,-segaddr,__GUESTDLL,0x180000000 \
+# preferred base 0x140000000, translated DLLs at 0x160000000 (rebased: 0x180000000 is the arm64 shared cache's range).
+LDFLAGS ?= $(ARCH) -Wl,-export_dynamic -Wl,-segaddr,__GUEST,0x140000000 -Wl,-segaddr,__GUESTDLL,0x160000000 \
            -framework CoreGraphics -framework CoreFoundation -framework AppKit -framework QuartzCore \
            -framework AudioToolbox -framework CoreAudio -framework GameController -framework CoreHaptics -framework Metal
 
@@ -148,9 +148,10 @@ clean:
 
 # ---- extra translated DLLs (game DLLs that contain code) ----
 # $(call MODULE_RULES,name,dll,dir,extra translator options,extra cflags) defines `gen-<name>` and
-# $(BUILD)/lib<name>.a; add the library to EXTRA_LIBS_FORCE. A DLL whose preferred base collides with another
-# one is translated rebased (--rebase <hex>). Example:
-#   $(eval $(call MODULE_RULES,bink2w64,orig_bink.dll,gen_bink,--rebase 182000000 --no-abi-trim,-DRT_TSO=0))
+# $(BUILD)/lib<name>.a; add the library to EXTRA_LIBS_FORCE. DLLs are translated rebased (--rebase <hex>) into
+# the DLL range at 0x160000000-0x164000000: their usual preferred base, 0x180000000, is where arm64 macOS maps
+# its shared cache. Example:
+#   $(eval $(call MODULE_RULES,bink2w64,orig_bink.dll,gen_bink,--rebase 162000000 --no-abi-trim,-DRT_TSO=0))
 #   EXTRA_LIBS_FORCE += $(BUILD)/libbink2w64.a
 define MODULE_RULES
 gen-$(1):

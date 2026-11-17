@@ -83,7 +83,8 @@ game.c + runtime/ ──────────────────clang─
 
 **Execution core** (`cpu.h`, `rt.c`, `teb.c`, `fiber.c`):
 - **Memory.** Guest memory is identity-mapped: the executable is loaded at its preferred base (`0x140000000`) and
-  translated DLLs at `0x180000000`, so guest pointers are host pointers.
+  translated DLLs rebased into `0x160000000`–`0x164000000` (`--rebase`; their usual base, `0x180000000`, is where
+  arm64 macOS maps its shared cache), so guest pointers are host pointers.
 - **Threads.** Each guest thread runs on a host thread with its own CPU state. `lock`-prefixed operations map to
   atomic builtins, and fibers are supported.
 - **Memory ordering.** x86's TSO ordering is preserved by emitting guest loads and stores as acquire/release
