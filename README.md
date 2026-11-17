@@ -205,6 +205,11 @@ A separate translator and runtime for i386 Mach-O executables. Games link agains
   of scope for static recompilation.
 - Windows API coverage reflects the games ported so far, and grows with each port.
 
+## Support and Feedback
+
+  * [GitHub Issue Tracker](https://github.com/NightSightProductions/Recomp-Framework/issues)
+  * [Discord](https://discord.gg/GKacpbpyQb)
+
 ## License
 
 MIT, see [LICENSE](LICENSE). Bundled third-party components:
