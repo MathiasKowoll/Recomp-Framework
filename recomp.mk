@@ -120,17 +120,23 @@ fuzz:
 MESA_DIR ?= external/mesa
 MESA_REF ?= main
 KK_STAGE = $(BUILD)/kosmickrisp
+# The driver targets the app's minimum macOS, like the runtime: without it, clang targets the build Mac's macOS,
+# its @available(macOS 27, *) checks compile to "always", and on macOS 26 Metal throws on the first texture view
+# (-[MTLTextureViewDescriptor setMinLOD:]: unrecognized selector). Meson keeps these from the first setup:
+# remove $(MESA_DIR)/build after changing MACOS_MIN.
+KK_MIN = -mmacosx-version-min=$(MACOS_MIN)
 kosmickrisp:
 	@test -d $(MESA_DIR) || git clone --depth 1 --branch $(MESA_REF) https://gitlab.freedesktop.org/mesa/mesa.git $(MESA_DIR)
 	@test -x external/mesa-venv/bin/python || { /opt/homebrew/bin/python3 -m venv external/mesa-venv && external/mesa-venv/bin/pip install -q mako packaging pyyaml; }
-	@test -d $(MESA_DIR)/build || PATH="/opt/homebrew/opt/llvm/bin:$(CURDIR)/external/mesa-venv/bin:$$PATH" meson setup $(MESA_DIR)/build $(MESA_DIR) \
+	@test -d $(MESA_DIR)/build || MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN) PATH="/opt/homebrew/opt/llvm/bin:$(CURDIR)/external/mesa-venv/bin:$$PATH" meson setup $(MESA_DIR)/build $(MESA_DIR) \
 	    --prefix=$(CURDIR)/external/kk-install --buildtype=release -Db_ndebug=true -Dplatforms=macos -Dvulkan-drivers=kosmickrisp \
-	    -Dgallium-drivers= -Dopengl=false -Dzstd=disabled --prefer-static --pkg-config-path=/usr/local/lib/pkgconfig
+	    -Dgallium-drivers= -Dopengl=false -Dzstd=disabled --prefer-static --pkg-config-path=/usr/local/lib/pkgconfig \
+	    -Dc_args=$(KK_MIN) -Dcpp_args=$(KK_MIN) -Dobjc_args=$(KK_MIN) -Dc_link_args=$(KK_MIN) -Dcpp_link_args=$(KK_MIN) -Dobjc_link_args=$(KK_MIN)
 	@for p in $(abspath $(FW))/patches/mesa/*.patch; do \
 	    git -C $(MESA_DIR) apply --reverse --check "$$p" 2>/dev/null && continue; \
 	    git -C $(MESA_DIR) apply "$$p" && echo "applied $$(basename $$p)" || exit 1; \
 	done
-	PATH="/opt/homebrew/opt/llvm/bin:$(CURDIR)/external/mesa-venv/bin:$$PATH" ninja -C $(MESA_DIR)/build install
+	MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN) PATH="/opt/homebrew/opt/llvm/bin:$(CURDIR)/external/mesa-venv/bin:$$PATH" ninja -C $(MESA_DIR)/build install
 	rm -rf $(KK_STAGE) && mkdir -p $(KK_STAGE)/drirc.d
 	cp external/kk-install/lib/libvulkan_kosmickrisp.dylib $(KK_STAGE)/
 	cp /usr/local/lib/libvulkan.1.dylib $(KK_STAGE)/
