@@ -45,7 +45,8 @@ usage:
 games.conf has one game per line, tab separated: appid, app executable, exe glob, force exe, pass-paths (yes/no),
 name, and optionally environment (space-separated NAME=value). The launcher writes what each launch did to ~/Library/Logs/<tool id>.log.
 Set NSR_TOOLS_DIR / NSR_STEAM_ROOT to use another compatibilitytools.d / Steam folder (for testing).
-Based on a community contributor's multi-game version of tools/steam_play_tool.py.
+Based on a community contributor's multi-game version of the earlier one-tool-per-game Steam Play script, which
+NSR replaces.
 """
 import os, plistlib, shutil, subprocess, sys, tempfile
 

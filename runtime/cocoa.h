@@ -25,6 +25,9 @@ void cocoa_frame_insets(int titled, int resizable, int *l, int *t, int *r, int *
 void cocoa_set_virtual_screen(int w, int h);   // emulated primary display mode (0, 0 = native)
 char *cocoa_choose_folder(const char *message);   // folder picker (malloc'd path or NULL)
 void cocoa_alert(const char *title, const char *text);
+char *cocoa_clipboard_text(void);              // malloc'd UTF-8 text on the pasteboard, or NULL
+void cocoa_clipboard_set_text(const char *utf8);
+void cocoa_clipboard_clear(void);
 void cocoa_pick_friends(int n, const char *const *names, const char *const *details,
                         void (*done)(const int *picked, int npicked, void *ctx), void *ctx);   // async friends picker
 

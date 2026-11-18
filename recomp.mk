@@ -2,7 +2,8 @@
 #
 #   FW        = path/to/Recomp-Framework
 #   GAME_EXE  = orig.exe                  # the game's Windows executable (a symlink to the user's copy)
-#   APP_NAME  = MyGame                    # the .app name
+#   APP_NAME  = MyGame                    # the app's executable name; APP_FILE / APP_DISPLAY (default APP_NAME):
+#                                         # the .app's file name and the name shown in the menu bar and Dock
 #   BUNDLE_ID = com.example.mygame-recomp
 #   GAME_SRC  = game.c                    # game.c (the RtGame settings) plus any game-specific runtime code
 #   NATIVE    = native.txt                # optional: guest functions replaced by native ones (addr name)
@@ -21,6 +22,8 @@ MACOS_MIN ?= 26.0
 GEN_DIR   ?= gen
 BUILD     ?= build
 APP_NAME  ?= Game
+APP_FILE  ?= $(APP_NAME)
+APP_DISPLAY ?= $(APP_NAME)
 BUNDLE_ID ?= com.example.game-recomp
 APP_CATEGORY ?= public.app-category.games
 APP_FLAGS ?=
@@ -73,7 +76,7 @@ $(BUILD)/libgame.a: $(GEN_OBJ)
 
 # ---- runtime ----
 FW_RT_C = rt.c teb.c kernel32.c handles.c files.c vulkan.c display.c window.c bcrypt.c input.c xaudio2.c pdh.c \
-          system.c dinput.c sockets.c wasapi.c fiber.c user32.c steam.c native.c spvfix.c setjmp.c
+          system.c dinput.c sockets.c wasapi.c fiber.c user32.c steam.c native.c spvfix.c setjmp.c xreverb.c
 FW_RT_M = cocoa.m winhttp.m gamepad.m gpucapture.m opengl.m
 RT_OBJ  = $(patsubst %.c,$(BUILD)/fw/%.o,$(FW_RT_C)) $(patsubst %.m,$(BUILD)/fw/%.o,$(FW_RT_M))
 GAME_OBJ = $(patsubst %.c,$(BUILD)/game/%.o,$(GAME_SRC))
@@ -105,7 +108,8 @@ runtime: $(RT_OBJ) $(GAME_OBJ) $(BUILD)/fw/boot.o
 
 # ---- macOS app ----
 app: $(BUILD)/boot
-	$(PYTHON) $(FW)/tools/make_app.py $(BUILD)/boot $(GAME_EXE) $(BUILD)/$(APP_NAME).app --name "$(APP_NAME)" \
+	$(PYTHON) $(FW)/tools/make_app.py $(BUILD)/boot $(GAME_EXE) "$(BUILD)/$(APP_FILE).app" --name "$(APP_NAME)" \
+	    --display-name "$(APP_DISPLAY)" \
 	    --bundle-id $(BUNDLE_ID) --category $(APP_CATEGORY) $(APP_FLAGS)
 
 # ---- Vulkan thunks (generated from the Vulkan headers) ----
