@@ -3,13 +3,16 @@
 
 usage: make_app.py BINARY GAME_EXE OUT.app [--name NAME] [--display-name NAME] [--bundle-id ID] [--category UTI]
                    [--version V]
-                   [--resource FILE[=NAME]]... [--no-vulkan]
+                   [--resource FILE[=NAME]]... [--lib DYLIB]... [--icon IMAGE] [--no-vulkan]
   BINARY    the linked runtime + recompiled game (build/boot)
   GAME_EXE  the original Windows executable, used only for its icon
   --name    executable name (default: OUT.app's name)
   --display-name  the name shown in the menu bar, Dock and app switcher (default: --name); may contain characters a
                   file name can't, e.g. a colon, while OUT.app keeps a plain file name
   --resource  copy FILE into Contents/Resources (as NAME), e.g. the image named by rt_game.image
+  --lib       copy DYLIB into Contents/Frameworks (signed), e.g. a d3d9 backend the runtime dlopens
+  --icon      the app icon from IMAGE (any format sips reads; center-cropped to a square) instead of the exe's,
+              for games whose exe icon is tiny
   --no-vulkan an OpenGL game: no Vulkan driver in the bundle
 The app finds the game folder itself on launch (see runtime/boot.c), so no game data goes in the bundle.
 """
@@ -28,6 +31,10 @@ version = opt("--version", "0.1")
 resources = []
 while "--resource" in args:
     resources.append(opt("--resource", None))
+libs = []
+while "--lib" in args:
+    libs.append(opt("--lib", None))
+icon_image = opt("--icon", None)
 no_vulkan = "--no-vulkan" in args
 if no_vulkan: args.remove("--no-vulkan")
 binary, game_exe, app = args[0], args[1], args[2]
@@ -50,6 +57,9 @@ kk = os.path.join(os.path.dirname(binary), "kosmickrisp")
 for r in resources:
     src, _, name = r.partition("=")
     shutil.copy2(src, os.path.join(res, name or os.path.basename(src)))
+for lib in libs:
+    os.makedirs(os.path.join(contents, "Frameworks"), exist_ok=True)
+    shutil.copy2(lib, os.path.join(contents, "Frameworks", os.path.basename(lib)))
 if no_vulkan:
     pass
 elif os.path.isdir(kk):
@@ -89,7 +99,13 @@ with open(os.path.join(contents, "Info.plist"), "wb") as f:
 # icon: the exe's own application icon -> .iconset -> .icns
 with tempfile.TemporaryDirectory() as tmp:
     png = os.path.join(tmp, "icon.png")
-    subprocess.run([sys.executable, os.path.join(here, "app_icon.py"), game_exe, png], check=True)
+    if icon_image:
+        subprocess.run(["sips", "-s", "format", "png", icon_image, "--out", png], check=True, capture_output=True)
+        dims = subprocess.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", png], check=True, capture_output=True, text=True).stdout.split()
+        side = min(int(dims[dims.index("pixelWidth:") + 1]), int(dims[dims.index("pixelHeight:") + 1]))
+        subprocess.run(["sips", "--cropToHeightWidth", str(side), str(side), png], check=True, capture_output=True)
+    else:
+        subprocess.run([sys.executable, os.path.join(here, "app_icon.py"), game_exe, png], check=True)
     iconset = os.path.join(tmp, app_name + ".iconset")
     os.makedirs(iconset)
     for size in (16, 32, 64, 128, 256, 512):
@@ -101,6 +117,8 @@ with tempfile.TemporaryDirectory() as tmp:
     shutil.copy2(png, os.path.join(res, app_name + ".png"))   # e.g. for a Steam library shortcut
 
 # ad-hoc signatures: the bundled dylibs first, then the whole bundle (arm64 code must be signed to run)
+for lib in libs:
+    subprocess.run(["codesign", "--force", "--sign", "-", os.path.join(contents, "Frameworks", os.path.basename(lib))], check=True, capture_output=True)
 fw = os.path.join(contents, "Frameworks", "kosmickrisp")
 if os.path.isdir(fw):
     for f in sorted(os.listdir(fw)):

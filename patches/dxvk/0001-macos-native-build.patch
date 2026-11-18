@@ -1,0 +1,681 @@
+diff --git a/dxvk_smoke_d3d9.log b/dxvk_smoke_d3d9.log
+new file mode 100644
+index 00000000..9b1e19ac
+--- /dev/null
++++ b/dxvk_smoke_d3d9.log
+@@ -0,0 +1,302 @@
++info:  Game: dxvk_smoke
++info:  DXVK: v3.1.1+
++info:  Build: aarch64 clang 21.0.0
++info:  Found config file: dxvk.conf
++info:  Vulkan: Found vkGetInstanceProcAddr in libvulkan.1.dylib @ 0x105d3d344
++info:  Extension providers:
++info:    Platform WSI
++info:  Enabled instance extensions:
++info:    VK_EXT_metal_surface
++info:    VK_KHR_get_surface_capabilities2
++info:    VK_KHR_surface
++info:    VK_KHR_surface_maintenance1
++info:  Found device: Apple M5 (KosmicKrisp 26.99.99)
++info:  D3D9: Detected nonclassical vendor ID: 0x106b
++info:  D3D9: Hiding actual GPU, reporting:
++info:    vendor ID: 0x1002
++info:    device ID: 0x73df
++info:    device description: AMD Radeon RX 6700 XT
++info:  D3D9: VK_FORMAT_D24_UNORM_S8_UINT -> VK_FORMAT_D32_SFLOAT_S8_UINT
++info:  D3D9: VK_FORMAT_D16_UNORM_S8_UINT -> VK_FORMAT_D32_SFLOAT_S8_UINT
++info:  Creating device:
++info:  Apple M5:
++info:    Driver   : KosmicKrisp 26.99.99
++info:  Queues:
++info:    Graphics : (0, 0)
++info:    Transfer : (0, 0)
++info:    Sparse   : (4294967295, 0)
++info:  Memory:
++info:    Heap 0: 11.84 GiB (DEVICE_LOCAL)
++info:    Budget: 4.97 GiB
++info:      Type  0: DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT | HOST_CACHED
++info:  Enabled extensions:
++info:    VK_EXT_attachment_feedback_loop_layout
++info:    VK_EXT_depth_clip_enable
++info:    VK_EXT_extended_dynamic_state3
++info:    VK_EXT_hdr_metadata
++info:    VK_EXT_multi_draw
++info:    VK_EXT_robustness2
++info:    VK_EXT_sample_locations
++info:    VK_EXT_shader_stencil_export
++info:    VK_EXT_vertex_attribute_divisor
++info:    VK_KHR_dynamic_rendering_local_read
++info:    VK_KHR_load_store_op_none
++info:    VK_KHR_maintenance5
++info:    VK_KHR_maintenance6
++info:    VK_KHR_maintenance7
++info:    VK_KHR_maintenance8
++info:    VK_KHR_maintenance9
++info:    VK_KHR_maintenance10
++info:    VK_KHR_present_id
++info:    VK_KHR_present_wait
++info:    VK_KHR_shader_float_controls2
++info:    VK_KHR_shader_subgroup_uniform_control_flow
++info:    VK_KHR_shader_untyped_pointers
++info:    VK_KHR_swapchain
++info:    VK_KHR_swapchain_maintenance1
++info:    VK_KHR_swapchain_mutable_format
++info:    VK_KHR_unified_image_layouts
++info:  Enabled features:
++info:    depthBiasClamp                 : 1
++info:    depthBounds                    : 1
++info:    depthClamp                     : 1
++info:    drawIndirectFirstInstance      : 1
++info:    dualSrcBlend                   : 1
++info:    fillModeNonSolid               : 1
++info:    fragmentStoresAndAtomics       : 1
++info:    fullDrawIndexUint32            : 1
++info:    geometryShader                 : 1
++info:    imageCubeArray                 : 1
++info:    independentBlend               : 1
++info:    largePoints                    : 1
++info:    logicOp                        : 1
++info:    multiDrawIndirect              : 1
++info:    multiViewport                  : 1
++info:    occlusionQueryPrecise          : 1
++info:    pipelineStatisticsQuery        : 0
++info:    robustBufferAccess             : 1
++info:    sampleRateShading              : 1
++info:    samplerAnisotropy              : 1
++info:    shaderClipDistance             : 1
++info:    shaderCullDistance             : 1
++info:    shaderFloat64                  : 0
++info:    shaderImageGatherExtended      : 1
++info:    shaderInt16                    : 1
++info:    shaderInt64                    : 1
++info:    shaderUniformBufferArrayDynamicIndexing : 1
++info:    shaderSampledImageArrayDynamicIndexing : 1
++info:    shaderStorageBufferArrayDynamicIndexing : 1
++info:    shaderStorageImageArrayDynamicIndexing : 1
++info:    sparseBinding                  : 0
++info:    sparseResidencyBuffer          : 0
++info:    sparseResidencyImage2D         : 0
++info:    sparseResidencyImage3D         : 0
++info:    sparseResidency2Samples        : 0
++info:    sparseResidency4Samples        : 0
++info:    sparseResidency8Samples        : 0
++info:    sparseResidency16Samples       : 0
++info:    sparseResidencyAliased         : 0
++info:    shaderResourceResidency        : 0
++info:    shaderResourceMinLod           : 1
++info:    tessellationShader             : 1
++info:    textureCompressionBC           : 1
++info:    variableMultisampleRate        : 0
++info:    vertexPipelineStoresAndAtomics : 1
++info:    wideLines                      : 0
++info:    shaderDrawParameters           : 1
++info:    storageBuffer16BitAccess       : 1
++info:    storagePushConstant16          : 1
++info:    bufferDeviceAddress            : 1
++info:    descriptorIndexing             : 1
++info:    storageBuffer8BitAccess        : 1
++info:    storagePushConstant8           : 1
++info:    shaderUniformTexelBufferArrayDynamicIndexing : 1
++info:    shaderStorageTexelBufferArrayDynamicIndexing : 1
++info:    shaderUniformBufferArrayNonUniformIndexing : 1
++info:    shaderSampledImageArrayNonUniformIndexing : 1
++info:    shaderStorageBufferArrayNonUniformIndexing : 1
++info:    shaderStorageImageArrayNonUniformIndexing : 1
++info:    shaderUniformTexelBufferArrayNonUniformIndexing : 1
++info:    shaderStorageTexelBufferArrayNonUniformIndexing : 1
++info:    descriptorBindingSampledImageUpdateAfterBind : 1
++info:    descriptorBindingUpdateUnusedWhilePending : 1
++info:    descriptorBindingPartiallyBound : 1
++info:    drawIndirectCount              : 1
++info:    hostQueryReset                 : 1
++info:    runtimeDescriptorArray         : 1
++info:    samplerFilterMinmax            : 1
++info:    samplerMirrorClampToEdge       : 1
++info:    scalarBlockLayout              : 1
++info:    shaderFloat16                  : 1
++info:    shaderInt8                     : 1
++info:    shaderOutputViewportIndex      : 1
++info:    shaderOutputLayer              : 1
++info:    timelineSemaphore              : 1
++info:    uniformBufferStandardLayout    : 1
++info:    vulkanMemoryModel              : 1
++info:    inlineUniformBlock             : 1
++info:    computeFullSubgroups           : 1
++info:    dynamicRendering               : 1
++info:    maintenance4                   : 1
++info:    robustImageAccess              : 0
++info:    pipelineCreationCacheControl   : 1
++info:    shaderDemoteToHelperInvocation : 1
++info:    shaderZeroInitializeWorkgroupMemory : 1
++info:    subgroupSizeControl            : 1
++info:    synchronization2               : 1
++info:  VK_EXT_attachment_feedback_loop_layout:
++info:    attachmentFeedbackLoopLayout   : 1
++info:  VK_EXT_border_color_swizzle:
++info:    borderColorSwizzle             : 0
++info:    borderColorSwizzleFromImage    : 0
++info:  VK_EXT_conservative_rasterization:
++info:    extConservativeRasterization   : 0
++info:  VK_EXT_custom_border_color:
++info:    customBorderColors             : 0
++info:    customBorderColorWithoutFormat : 0
++info:  VK_EXT_depth_clip_enable:
++info:    depthClipEnable                : 1
++info:  VK_EXT_depth_bias_control:
++info:    depthBiasControl               : 0
++info:    leastRepresentableValueForceUnormRepresentation : 0
++info:    floatRepresentation            : 0
++info:    depthBiasExact                 : 0
++info:  VK_EXT_descriptor_buffer:
++info:    descriptorBuffer               : 0
++info:  VK_EXT_descriptor_heap:
++info:    descriptorHeap                 : 0
++info:  VK_EXT_dynamic_rendering_unused_attachments:
++info:    dynamicRenderingUnusedAttachments : 0
++info:  VK_EXT_extended_dynamic_state3:
++info:    extendedDynamicState3AlphaToCoverageEnable : 0
++info:    extendedDynamicState3DepthClipEnable : 1
++info:    extendedDynamicState3RasterizationSamples : 0
++info:    extendedDynamicState3SampleMask : 0
++info:    extendedDynamicState3LineRasterizationMode : 1
++info:    extendedDynamicState3SampleLocationsEnable : 1
++info:  VK_EXT_fragment_shader_interlock:
++info:    fragmentShaderSampleInterlock  : 0
++info:    fragmentShaderPixelInterlock   : 0
++info:  VK_EXT_full_screen_exclusive:
++info:    extFullScreenExclusive         : 0
++info:  VK_EXT_graphics_pipeline_library:
++info:    graphicsPipelineLibrary        : 0
++info:  VK_EXT_hdr_metadata:
++info:    extHdrMetadata                 : 1
++info:  VK_EXT_line_rasterization:
++info:    rectangularLines               : 0
++info:    smoothLines                    : 0
++info:  VK_EXT_memory_budget:
++info:    extMemoryBudget                : 1
++info:  VK_EXT_memory_priority:
++info:    memoryPriority                 : 0
++info:  VK_EXT_multi_draw:
++info:    multiDraw                      : 1
++info:  VK_EXT_non_seamless_cube_map:
++info:    nonSeamlessCubeMap             : 0
++info:  VK_EXT_pageable_device_local_memory:
++info:    pageableDeviceLocalMemory      : 0
++info:  VK_EXT_robustness2:
++info:    robustBufferAccess2            : 1
++info:    robustImageAccess2             : 1
++info:    nullDescriptor                 : 1
++info:  VK_EXT_sample_locations:
++info:    extSampleLocations             : 1
++info:  VK_EXT_shader_module_identifier:
++info:    shaderModuleIdentifier         : 0
++info:  VK_EXT_shader_stencil_export:
++info:    extShaderStencilExport         : 1
++info:  VK_EXT_swapchain_colorspace:
++info:    extSwapchainColorSpace         : 0
++info:  VK_EXT_swapchain_maintenance1:
++info:    swapchainMaintenance1          : 0
++info:  VK_EXT_transform_feedback:
++info:    transformFeedback              : 0
++info:    geometryStreams                : 0
++info:  VK_EXT_vertex_attribute_divisor:
++info:    vertexAttributeInstanceRateDivisor : 1
++info:    vertexAttributeInstanceRateZeroDivisor : 1
++info:  VK_KHR_device_fault:
++info:    deviceFault                    : 0
++info:    deviceFaultVendorBinary        : 0
++info:  VK_KHR_dynamic_rendering_local_read:
++info:    dynamicRenderingLocalRead      : 1
++info:  VK_KHR_external_memory_win32:
++info:    khrExternalMemoryWin32         : 0
++info:  VK_KHR_external_semaphore_win32:
++info:    khrExternalSemaphoreWin32      : 0
++info:  VK_KHR_incremental_present:
++info:    khrIncrementalPresent          : 0
++info:  VK_KHR_load_store_op_none:
++info:    khrLoadStoreOpNone             : 1
++info:  VK_KHR_maintenance5:
++info:    maintenance5                   : 1
++info:  VK_KHR_maintenance6:
++info:    maintenance6                   : 1
++info:  VK_KHR_maintenance7:
++info:    maintenance7                   : 1
++info:  VK_KHR_maintenance8:
++info:    maintenance8                   : 1
++info:  VK_KHR_maintenance9:
++info:    maintenance9                   : 1
++info:  VK_KHR_maintenance10:
++info:    maintenance10                  : 1
++info:  VK_KHR_maintenance11:
++info:    maintenance11                  : 0
++info:  VK_KHR_pipeline_library:
++info:    khrPipelineLibrary             : 0
++info:  VK_KHR_present_id:
++info:    presentId                      : 1
++info:  VK_KHR_present_id2:
++info:    presentId2                     : 0
++info:  VK_KHR_present_wait:
++info:    presentWait                    : 1
++info:  VK_KHR_present_wait2:
++info:    presentWait2                   : 0
++info:  VK_KHR_shader_float_controls2:
++info:    shaderFloatControls2           : 1
++info:  VK_KHR_shader_subgroup_uniform_control_flow:
++info:    shaderSubgroupUniformControlFlow : 1
++info:  VK_KHR_shader_untyped_pointers:
++info:    shaderUntypedPointers          : 1
++info:  VK_KHR_swapchain:
++info:    khrSwapchain                   : 1
++info:  VK_KHR_swapchain_maintenance1:
++info:    swapchainMaintenance1          : 1
++info:  VK_KHR_swapchain_mutable_format:
++info:    khrSwapchainMutableFormat      : 1
++info:  VK_KHR_unified_image_layouts:
++info:    unifiedImageLayouts            : 1
++info:  VK_KHR_win32_keyed_mutex:
++info:    khrWin32KeyedMutex             : 0
++info:  VK_AMD_buffer_marker:
++info:    amdBufferMarker                : 0
++info:  VK_NV_device_diagnostic_checkpoints:
++info:    nvDeviceDiagnosticCheckpoints  : 0
++info:  VK_NV_low_latency2:
++info:    nvLowLatency2                  : 0
++info:  VK_NV_raw_access_chains:
++info:    shaderRawAccessChains          : 0
++info:  VK_NVX_binary_import:
++info:    nvxBinaryImport                : 0
++info:  VK_NVX_image_view_handle:
++info:    nvxImageViewHandle             : 0
++info:  Memory type mask for buffer resources: 0x1, usage: 0x201ff
++info:  Graphics pipeline libraries not supported
++info:  Binding model: Legacy
++warn:  D3D9DeviceEx::SetupFPU: not supported on this arch.
++info:  D3D9DeviceEx::ResetSwapChain:
++info:    Requested Presentation Parameters
++info:      - Width:              640
++info:      - Height:             360
++info:      - Format:             D3D9Format::X8R8G8B8
++info:      - Auto Depth Stencil: true
++info:                  ^ Format: D3D9Format::D24S8
++info:      - Windowed:           true
++info:      - Swap effect:        1
++info:  Presenter: Actual swapchain properties:
++info:    Format:       VK_FORMAT_B8G8R8A8_UNORM
++info:    Color space:  VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
++info:    Present mode: VK_PRESENT_MODE_FIFO_KHR (dynamic: no)
++info:    Buffer size:  640x360
++info:    Image count:  3
+diff --git a/include/native/wsi/native_host.h b/include/native/wsi/native_host.h
+new file mode 100644
+index 00000000..1e6b2ac8
+--- /dev/null
++++ b/include/native/wsi/native_host.h
+@@ -0,0 +1,31 @@
++// "Host" WSI for DXVK native: the embedding application owns its windows and hands DXVK a CAMetalLayer per HWND.
++// HWNDs are opaque handles chosen by the application. Select with DXVK_WSI_DRIVER=Host and register the callbacks
++// before the first Direct3DCreate9 / CreateDXGIFactory call.
++#pragma once
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct DxvkHostWsiCallbacks {
++    uint32_t version;   // 1
++    // client area size in pixels (the swap chain size when the game doesn't say)
++    void  (*get_window_size)(void *hwnd, uint32_t *width, uint32_t *height);
++    // the game resized its window (windowed mode); width/height in pixels
++    void  (*resize_window)(void *hwnd, uint32_t width, uint32_t height);
++    // the CAMetalLayer backing the window, for VK_EXT_metal_surface
++    void *(*get_metal_layer)(void *hwnd);
++    int   (*is_window)(void *hwnd);
++    int   (*is_minimized)(void *hwnd);
++    // the display: size in pixels and refresh rate in mHz
++    void  (*get_display)(uint32_t *width, uint32_t *height, uint32_t *refresh_mhz);
++    // fullscreen on/off for the window (a borderless desktop-sized window is fine)
++    int   (*set_fullscreen)(void *hwnd, int fullscreen);
++} DxvkHostWsiCallbacks;
++
++void dxvk_host_wsi_set_callbacks(const DxvkHostWsiCallbacks *callbacks);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/meson.build b/meson.build
+index 4964301b..dbf51330 100644
+--- a/meson.build
++++ b/meson.build
+@@ -161,7 +161,11 @@ else
+   if lib_glfw.found()
+     compiler_args += ['-DDXVK_WSI_GLFW']
+   endif
+-  if (not lib_sdl3.found() and not lib_sdl2.found() and not lib_glfw.found())
++  if platform == 'darwin'
++    # the embedding app provides windows and CAMetalLayers (include/native/wsi/native_host.h)
++    compiler_args += ['-DDXVK_WSI_HOST']
++  endif
++  if (platform != 'darwin' and not lib_sdl3.found() and not lib_sdl2.found() and not lib_glfw.found())
+     error('SDL3, SDL2, or GLFW are required to build dxvk-native')
+   endif
+   
+diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
+index 53d23a64..4d25bc82 100644
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -55,7 +55,7 @@ d3d9_src = [
+ d3d9_ld_args      = []
+ d3d9_link_depends = []
+ 
+-if platform != 'windows'
++if platform != 'windows' and platform != 'darwin'   # ld64 has no --version-script
+   d3d9_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d9.sym') ]
+   d3d9_link_depends += files('d3d9.sym')
+ endif
+diff --git a/src/util/util_env.cpp b/src/util/util_env.cpp
+index 556327c0..ca85158e 100644
+--- a/src/util/util_env.cpp
++++ b/src/util/util_env.cpp
+@@ -10,6 +10,9 @@
+ #include <sys/sysctl.h>
+ #include <unistd.h>
+ #include <limits.h>
++#elif defined(__APPLE__)
++#include <mach-o/dyld.h>
++#include <limits.h>
+ #endif
+ 
+ #include "util_env.h"
+@@ -102,6 +105,12 @@ namespace dxvk::env {
+     size_t count = readlink("/proc/self/exe", exePath.data(), exePath.size());
+ 
+     return std::string(exePath.begin(), exePath.begin() + count);
++#elif defined(__APPLE__)
++    char exePath[PATH_MAX] = {};
++    uint32_t size = PATH_MAX;
++    if (_NSGetExecutablePath(exePath, &size) != 0)
++      return "";
++    return std::string(exePath);
+ #elif defined(__FreeBSD__)
+     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, getpid()};
+     char exePath[PATH_MAX] = {};
+@@ -136,7 +145,11 @@ namespace dxvk::env {
+ #else
+     std::array<char, 16> posixName = {};
+     dxvk::str::strlcpy(posixName.data(), name.c_str(), 16);
++#ifdef __APPLE__
++    ::pthread_setname_np(posixName.data());   // macOS: names the calling thread only
++#else
+     ::pthread_setname_np(pthread_self(), posixName.data());
++#endif
+ #endif
+   }
+ 
+diff --git a/src/util/util_math.h b/src/util/util_math.h
+index 9276d933..a712940d 100644
+--- a/src/util/util_math.h
++++ b/src/util/util_math.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <cmath>
++#include <cstddef>
+ 
+ namespace dxvk {
+   
+diff --git a/src/util/util_win32_compat.h b/src/util/util_win32_compat.h
+index b706dca6..7a4b4a1e 100644
+--- a/src/util/util_win32_compat.h
++++ b/src/util/util_win32_compat.h
+@@ -1,6 +1,6 @@
+ #pragma once
+ 
+-#if defined(__unix__)
++#if defined(__unix__) || defined(__APPLE__)
+ 
+ #include <windows.h>
+ #include <dlfcn.h>
+diff --git a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
+index f9d1e98d..d3ccfbd1 100644
+--- a/src/vulkan/vulkan_loader.cpp
++++ b/src/vulkan/vulkan_loader.cpp
+@@ -5,22 +5,33 @@
+ #include "../util/log/log.h"
+ 
+ #include "../util/util_string.h"
++#include "../util/util_env.h"
+ #include "../util/util_win32_compat.h"
+ 
+ namespace dxvk::vk {
+ 
+   static std::pair<HMODULE, PFN_vkGetInstanceProcAddr> loadVulkanLibrary() {
+-    static const std::array<const char*, 2> dllNames = {{
++    static const std::vector<const char*> dllNames = {{
+ #ifdef _WIN32
+       "winevulkan.dll",
+       "vulkan-1.dll",
++#elif defined(__APPLE__)
++      "libvulkan.1.dylib",          // the Khronos loader (Vulkan SDK, or bundled next to the app)
++      "libvulkan.dylib",
++      "/usr/local/lib/libvulkan.1.dylib",
+ #else
+       "libvulkan.so",
+       "libvulkan.so.1",
+ #endif
+     }};
+ 
+-    for (auto dllName : dllNames) {
++    // DXVK_VULKAN_LOADER: an explicit loader path (an app bundle shipping its own loader)
++    std::vector<const char*> names = dllNames;
++    static std::string loaderEnv = env::getEnvVar("DXVK_VULKAN_LOADER");
++    if (!loaderEnv.empty())
++      names.insert(names.begin(), loaderEnv.c_str());
++
++    for (auto dllName : names) {
+       HMODULE library = LoadLibraryA(dllName);
+ 
+       if (!library)
+diff --git a/src/wsi/host/wsi_platform_host.cpp b/src/wsi/host/wsi_platform_host.cpp
+new file mode 100644
+index 00000000..84ad00c1
+--- /dev/null
++++ b/src/wsi/host/wsi_platform_host.cpp
+@@ -0,0 +1,154 @@
++#if defined(DXVK_WSI_HOST)
++
++// Host WSI: windows belong to the embedding application (see include/native/wsi/native_host.h).
++#include "../wsi_platform.h"
++#include "../wsi_monitor.h"
++#include "../wsi_window.h"
++#include "../../util/util_string.h"
++#include "../../util/log/log.h"
++#include "native/wsi/native_host.h"
++
++#include <windows.h>
++#include <cstring>
++#include <array>
++
++namespace dxvk::wsi {
++
++  static DxvkHostWsiCallbacks g_cb = {};
++  static const HMONITOR g_monitor = reinterpret_cast<HMONITOR>(uintptr_t(1));
++
++  // modes offered to the game: common sizes up to the display's, at its refresh rate
++  static const std::array<std::array<uint32_t, 2>, 14> g_sizes = {{
++    { 640, 480 }, { 800, 600 }, { 1024, 768 }, { 1280, 720 }, { 1280, 800 }, { 1280, 1024 }, { 1366, 768 },
++    { 1440, 900 }, { 1600, 900 }, { 1680, 1050 }, { 1920, 1080 }, { 1920, 1200 }, { 2560, 1440 }, { 3840, 2160 },
++  }};
++
++  class HostWsiDriver : public WsiDriver {
++    void display(uint32_t* w, uint32_t* h, uint32_t* mhz) {
++      *w = 1920; *h = 1080; *mhz = 60000;
++      if (g_cb.get_display) g_cb.get_display(w, h, mhz);
++    }
++    void fillMode(uint32_t w, uint32_t h, uint32_t mhz, WsiMode* m) {
++      m->width = w; m->height = h;
++      m->refreshRate = WsiRational { mhz, 1000 };
++      m->bitsPerPixel = 32;
++      m->interlaced = false;
++    }
++  public:
++    std::vector<const char *> getInstanceExtensions() {
++      return { VK_KHR_SURFACE_EXTENSION_NAME, "VK_EXT_metal_surface" };
++    }
++
++    HMONITOR getDefaultMonitor() { return g_monitor; }
++    HMONITOR enumMonitors(uint32_t index) { return index == 0 ? g_monitor : nullptr; }
++    HMONITOR enumMonitors(const LUID *adapterLUID[], uint32_t numLUIDs, uint32_t index) { return enumMonitors(index); }
++
++    bool getDisplayName(HMONITOR hMonitor, WCHAR (&Name)[32]) {
++      const char* n = "\\\\.\\DISPLAY1";
++      for (size_t i = 0; i < 32; i++) { Name[i] = WCHAR(n[i]); if (!n[i]) break; }
++      return true;
++    }
++
++    bool getDesktopCoordinates(HMONITOR hMonitor, RECT* pRect) {
++      uint32_t w, h, mhz; display(&w, &h, &mhz);
++      pRect->left = 0; pRect->top = 0; pRect->right = LONG(w); pRect->bottom = LONG(h);
++      return true;
++    }
++
++    bool getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode* pMode) {
++      uint32_t w, h, mhz; display(&w, &h, &mhz);
++      uint32_t k = 0;
++      for (const auto& s : g_sizes) {
++        if (s[0] > w || s[1] > h || (s[0] == w && s[1] == h))
++          continue;
++        if (k++ == modeNumber) { fillMode(s[0], s[1], mhz, pMode); return true; }
++      }
++      if (k == modeNumber) { fillMode(w, h, mhz, pMode); return true; }   // the native mode last
++      return false;
++    }
++
++    bool getCurrentDisplayMode(HMONITOR hMonitor, WsiMode* pMode) {
++      uint32_t w, h, mhz; display(&w, &h, &mhz);
++      fillMode(w, h, mhz, pMode);
++      return true;
++    }
++
++    bool getDesktopDisplayMode(HMONITOR hMonitor, WsiMode* pMode) { return getCurrentDisplayMode(hMonitor, pMode); }
++
++    WsiEdidData getMonitorEdid(HMONITOR hMonitor) { return {}; }
++
++    void getWindowSize(HWND hWindow, uint32_t* pWidth, uint32_t* pHeight) {
++      uint32_t w = 0, h = 0;
++      if (g_cb.get_window_size) g_cb.get_window_size(hWindow, &w, &h);
++      if (pWidth) *pWidth = w;
++      if (pHeight) *pHeight = h;
++    }
++
++    void resizeWindow(HWND hWindow, DxvkWindowState* pState, uint32_t width, uint32_t height) {
++      if (g_cb.resize_window) g_cb.resize_window(hWindow, width, height);
++    }
++
++    void saveWindowState(HWND, DxvkWindowState*, bool) { }
++    void restoreWindowState(HWND, DxvkWindowState*, bool) { }
++
++    bool setWindowMode(HMONITOR hMonitor, HWND hWindow, DxvkWindowState* pState, const WsiMode& mode) {
++      if (g_cb.resize_window) g_cb.resize_window(hWindow, mode.width, mode.height);
++      return true;
++    }
++
++    bool enterFullscreenMode(HMONITOR hMonitor, HWND hWindow, DxvkWindowState* pState, bool modeSwitch) {
++      return g_cb.set_fullscreen ? g_cb.set_fullscreen(hWindow, 1) != 0 : true;
++    }
++
++    bool leaveFullscreenMode(HWND hWindow, DxvkWindowState* pState) {
++      return g_cb.set_fullscreen ? g_cb.set_fullscreen(hWindow, 0) != 0 : true;
++    }
++
++    bool restoreDisplayMode() { return true; }
++    HMONITOR getWindowMonitor(HWND hWindow) { return g_monitor; }
++    bool isWindow(HWND hWindow) { return g_cb.is_window ? g_cb.is_window(hWindow) != 0 : hWindow != nullptr; }
++    bool isMinimized(HWND hWindow) { return g_cb.is_minimized ? g_cb.is_minimized(hWindow) != 0 : false; }
++    bool isOccluded(HWND hWindow) { return false; }
++    void updateFullscreenWindow(HMONITOR, HWND, bool) { }
++
++    VkResult createSurface(HWND hWindow, PFN_vkGetInstanceProcAddr pfnVkGetInstanceProcAddr, VkInstance instance, VkSurfaceKHR* pSurface) {
++      void* layer = g_cb.get_metal_layer ? g_cb.get_metal_layer(hWindow) : nullptr;
++      if (!layer) {
++        Logger::err("Host WSI: no CAMetalLayer for the window");
++        return VK_ERROR_INITIALIZATION_FAILED;
++      }
++      // VK_EXT_metal_surface, declared here so the build needs no platform headers
++      struct MetalSurfaceCreateInfo { VkStructureType sType; const void* pNext; VkFlags flags; const void* pLayer; };
++      typedef VkResult (VKAPI_PTR *PFN_CreateMetalSurface)(VkInstance, const MetalSurfaceCreateInfo*, const VkAllocationCallbacks*, VkSurfaceKHR*);
++      auto create = reinterpret_cast<PFN_CreateMetalSurface>(pfnVkGetInstanceProcAddr(instance, "vkCreateMetalSurfaceEXT"));
++      if (!create) {
++        Logger::err("Host WSI: vkCreateMetalSurfaceEXT not available");
++        return VK_ERROR_EXTENSION_NOT_PRESENT;
++      }
++      MetalSurfaceCreateInfo info = { VkStructureType(1000217000), nullptr, 0, layer };   // VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT
++      return create(instance, &info, nullptr, pSurface);
++    }
++  };
++
++  static bool createHostDriver(WsiDriver **driver) {
++    if (!g_cb.version) {
++      Logger::err("Host WSI: dxvk_host_wsi_set_callbacks was not called");
++      return false;
++    }
++    *driver = new HostWsiDriver();
++    return true;
++  }
++
++  WsiBootstrap HostWSI = {
++    "Host",
++    createHostDriver
++  };
++
++}
++
++extern "C" __attribute__((visibility("default"))) void dxvk_host_wsi_set_callbacks(const DxvkHostWsiCallbacks* callbacks) {
++  if (callbacks)
++    dxvk::wsi::g_cb = *callbacks;
++}
++
++#endif
+diff --git a/src/wsi/meson.build b/src/wsi/meson.build
+index 1d88e2cb..d366bc78 100644
+--- a/src/wsi/meson.build
++++ b/src/wsi/meson.build
+@@ -13,6 +13,7 @@ wsi_src = [
+   'glfw/wsi_monitor_glfw.cpp',
+   'glfw/wsi_platform_glfw.cpp',
+   'glfw/wsi_window_glfw.cpp',
++  'host/wsi_platform_host.cpp',
+ ]
+ 
+ wsi_deps = [ dep_displayinfo ]
+diff --git a/src/wsi/wsi_platform.cpp b/src/wsi/wsi_platform.cpp
+index 08f456e7..24e31515 100644
+--- a/src/wsi/wsi_platform.cpp
++++ b/src/wsi/wsi_platform.cpp
+@@ -12,6 +12,9 @@ namespace dxvk::wsi {
+ #if defined(DXVK_WSI_WIN32)
+     &Win32WSI,
+ #endif
++#if defined(DXVK_WSI_HOST)
++    &HostWSI,
++#endif
+ #if defined(DXVK_WSI_SDL3)
+     &Sdl3WSI,
+ #endif
+diff --git a/src/wsi/wsi_platform.h b/src/wsi/wsi_platform.h
+index f1fae3f1..964d31ec 100644
+--- a/src/wsi/wsi_platform.h
++++ b/src/wsi/wsi_platform.h
+@@ -114,6 +114,9 @@ namespace dxvk::wsi {
+ #if defined(DXVK_WSI_WIN32)
+   extern WsiBootstrap Win32WSI;
+ #endif
++#if defined(DXVK_WSI_HOST)
++  extern WsiBootstrap HostWSI;
++#endif
+ #if defined(DXVK_WSI_SDL3)
+   extern WsiBootstrap Sdl3WSI;
+ #endif
+diff --git a/subprojects/.wraplock b/subprojects/.wraplock
+new file mode 100644
+index 00000000..e69de29b
