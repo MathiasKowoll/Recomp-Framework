@@ -475,3 +475,23 @@ void cocoa_log_layer(void *p) {
                l.contentsGravity.UTF8String, l.frame.origin.x, l.frame.origin.y, (__bridge void *)l.superlayer);
     });
 }
+
+// ---------------- clipboard (user32 OpenClipboard & co.): plain text on the general pasteboard ----------------
+char *cocoa_clipboard_text(void) {   // malloc'd UTF-8, or NULL when the pasteboard holds no text
+    __block char *r = NULL;
+    on_main(^{
+        NSString *s = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
+        if (s) r = strdup(s.UTF8String ? s.UTF8String : "");
+    });
+    return r;
+}
+void cocoa_clipboard_set_text(const char *utf8) {
+    NSString *s = [NSString stringWithUTF8String:utf8 ? utf8 : ""];
+    if (!s) s = [[NSString alloc] initWithBytes:utf8 length:strlen(utf8) encoding:NSWindowsCP1252StringEncoding];
+    on_main(^{
+        NSPasteboard *pb = [NSPasteboard generalPasteboard];
+        [pb clearContents];
+        [pb setString:s ?: @"" forType:NSPasteboardTypeString];
+    });
+}
+void cocoa_clipboard_clear(void) { on_main(^{ [[NSPasteboard generalPasteboard] clearContents]; }); }

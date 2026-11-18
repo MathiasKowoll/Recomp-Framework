@@ -78,6 +78,8 @@ void I_dbghelp_dll_MiniDumpWriteDump(CPU *c) { RET(0); }
 void I_advapi32_dll_RegQueryValueExW(CPU *c) { RET(ERROR_FILE_NOT_FOUND); }
 void I_advapi32_dll_RegSetValueExA(CPU *c) { RET(ERROR_INVALID_HANDLE); }
 void I_advapi32_dll_RegCloseKey(CPU *c) { RET(0); }
+void I_advapi32_dll_RegCreateKeyA(CPU *c) { if (A2) wr64(A2, 0); RET(ERROR_FILE_NOT_FOUND); }   // no registry (as RegCreateKeyExA)
+void I_advapi32_dll_RegDeleteValueA(CPU *c) { RET(ERROR_FILE_NOT_FOUND); }
 
 // ---------------- shell32: known folders under C:\users\Player ----------------
 static void make_dirs(const char *win) {
@@ -215,4 +217,144 @@ void I_shlwapi_dll_PathFileExistsA(CPU *c) {
     char *p = A0 ? rt_host_path((const char *)PTR(A0)) : NULL;
     RET(p && access(p, F_OK) == 0);
     free(p);
+}
+
+// ---------------- winmm waveOut: PCM playback on a CoreAudio AudioQueue ----------------
+// One queue per open device. waveOutWrite copies the buffer into the queue; when it has played, its WAVEHDR is
+// marked done (WHDR_DONE set, WHDR_INQUEUE cleared) and the caller is told the way it asked: CALLBACK_EVENT sets the
+// event, CALLBACK_FUNCTION calls its waveOutProc (on a guest CPU of its own, from the queue's thread),
+// CALLBACK_WINDOW posts MM_WOM_DONE; CALLBACK_THREAD is not supported (logged; the flags still change).
+// WAVEHDR (x64): lpData +0, dwBufferLength +8, dwUser +16, dwFlags +24, dwLoops +28, lpNext +32, reserved +40.
+#include <AudioToolbox/AudioToolbox.h>
+#include "handles.h"
+#define WHDR_DONE 1
+#define WHDR_PREPARED 2
+#define WHDR_INQUEUE 0x10
+#define WOM_OPEN 0x3BB
+#define WOM_CLOSE 0x3BC
+#define WOM_DONE 0x3BD
+void win_from_cocoa(uint64_t hwnd, uint32_t msg, uint64_t wparam, uint64_t lparam);   // window.c: post to a window
+typedef struct WaveOut {
+    AudioQueueRef aq; int started, paused;
+    uint32_t cbtype; uint64_t cb, inst;
+    CPU *cpu;                              // CALLBACK_FUNCTION: guest CPU for the queue's thread
+    pthread_mutex_t mu;
+    uint64_t queued[256]; int nqueued;     // headers in the queue, for waveOutReset
+} WaveOut;
+static void wo_notify(WaveOut *w, uint32_t msg, uint64_t hdr) {
+    switch (w->cbtype) {
+    case 0x50000: {   // CALLBACK_EVENT
+        h_lock(); HObj *o = h_get(w->cb); if (o && o->type == HT_EVENT) { o->state = 1; h_wake(o); } h_unlock(); break; }
+    case 0x30000:     // CALLBACK_FUNCTION: waveOutProc(hwo, msg, instance, param1, param2)
+        if (w->cb) {
+            if (!w->cpu) w->cpu = cpu_new(1u << 18);
+            rt_set_cur(w->cpu);
+            uint64_t a[5] = { G(w), msg, w->inst, hdr, 0 };
+            guest_call(w->cpu, w->cb, 5, a);
+        }
+        break;
+    case 0x10000: if (w->cb) win_from_cocoa(w->cb, msg, G(w), hdr); break;   // CALLBACK_WINDOW (MM_WOM_* = WOM_*)
+    case 0x20000: { static int n; if (n++ < 1) rt_log("[winmm] waveOut CALLBACK_THREAD is not supported\n"); break; }
+    }
+}
+static void wo_done(WaveOut *w, uint64_t hdr) {
+    pthread_mutex_lock(&w->mu);
+    int found = 0;
+    for (int i = 0; i < w->nqueued; i++) if (w->queued[i] == hdr) { w->queued[i] = w->queued[--w->nqueued]; found = 1; break; }
+    pthread_mutex_unlock(&w->mu);
+    if (!found) return;   // already finished by waveOutReset
+    wr32(hdr + 24, (rd32(hdr + 24) | WHDR_DONE) & ~WHDR_INQUEUE);
+    wo_notify(w, WOM_DONE, hdr);
+}
+static void wo_callback(void *ud, AudioQueueRef aq, AudioQueueBufferRef b) {
+    WaveOut *w = ud; uint64_t hdr = (uint64_t)(uintptr_t)b->mUserData;
+    AudioQueueFreeBuffer(aq, b);
+    wo_done(w, hdr);
+}
+static int wo_format(uint64_t f, AudioStreamBasicDescription *d) {   // WAVEFORMATEX -> AudioQueue PCM, 0 if unsupported
+    uint16_t tag = rd16(f), ch = rd16(f + 2), bits = rd16(f + 14); uint32_t rate = rd32(f + 4);
+    if (tag == 0xFFFE && rd16(f + 16) >= 22) tag = rd16(f + 24) == 3 ? 3 : 1;   // WAVEFORMATEXTENSIBLE: its SubFormat
+    if (!ch || ch > 8 || !rate) return 0;
+    memset(d, 0, sizeof *d);
+    d->mFormatID = kAudioFormatLinearPCM; d->mSampleRate = rate; d->mChannelsPerFrame = ch; d->mFramesPerPacket = 1;
+    d->mBitsPerChannel = bits; d->mBytesPerFrame = d->mBytesPerPacket = ch * bits / 8;
+    if (tag == 1 && bits == 8) d->mFormatFlags = kAudioFormatFlagIsPacked;                                   // unsigned
+    else if (tag == 1 && bits == 16) d->mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+    else if (tag == 3 && bits == 32) d->mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    else return 0;
+    return 1;
+}
+void I_winmm_dll_waveOutGetNumDevs(CPU *c) { RET(1); }
+// waveOutOpen(*hwo, device, WAVEFORMATEX*, callback, instance, flags)
+void I_winmm_dll_waveOutOpen(CPU *c) {
+    uint64_t out = A0, fmt = A2, cb = A3, inst = AN(4); uint32_t flags = (uint32_t)AN(5);
+    AudioStreamBasicDescription d;
+    if (!fmt || !wo_format(fmt, &d)) { RET(32); return; }   // WAVERR_BADFORMAT
+    if (flags & 1) { RET(0); return; }                      // WAVE_FORMAT_QUERY
+    WaveOut *w = calloc(1, sizeof *w);
+    w->cbtype = flags & 0x70000; w->cb = cb; w->inst = inst;
+    pthread_mutex_init(&w->mu, NULL);
+    if (AudioQueueNewOutput(&d, wo_callback, w, NULL, NULL, 0, &w->aq) != noErr) { free(w); RET(1); return; }   // MMSYSERR_ERROR
+    if (out) wr64(out, G(w));
+    rt_log("[winmm] waveOutOpen: %u ch, %u Hz, %u-bit%s\n", d.mChannelsPerFrame, (uint32_t)d.mSampleRate, d.mBitsPerChannel,
+           (d.mFormatFlags & kAudioFormatFlagIsFloat) ? " float" : "");
+    wo_notify(w, WOM_OPEN, 0);
+    RET(0);
+}
+void I_winmm_dll_waveOutPrepareHeader(CPU *c) { if (!A1) { RET(11); return; } wr32(A1 + 24, rd32(A1 + 24) | WHDR_PREPARED); RET(0); }
+void I_winmm_dll_waveOutUnprepareHeader(CPU *c) {
+    if (!A1) { RET(11); return; }
+    if (rd32(A1 + 24) & WHDR_INQUEUE) { RET(33); return; }   // WAVERR_STILLPLAYING
+    wr32(A1 + 24, rd32(A1 + 24) & ~WHDR_PREPARED); RET(0);
+}
+// waveOutWrite(hwo, WAVEHDR*, size)
+void I_winmm_dll_waveOutWrite(CPU *c) {
+    WaveOut *w = PTR(A0); uint64_t hdr = A1;
+    if (!w || !hdr) { RET(5); return; }
+    if (!(rd32(hdr + 24) & WHDR_PREPARED)) { RET(34); return; }   // WAVERR_UNPREPARED
+    uint32_t n = rd32(hdr + 8);
+    AudioQueueBufferRef b;
+    if (AudioQueueAllocateBuffer(w->aq, n ? n : 1, &b) != noErr) { RET(7); return; }   // MMSYSERR_NOMEM
+    memcpy(b->mAudioData, PTR(rd64(hdr)), n); b->mAudioDataByteSize = n; b->mUserData = (void *)(uintptr_t)hdr;
+    wr32(hdr + 24, (rd32(hdr + 24) & ~WHDR_DONE) | WHDR_INQUEUE);
+    pthread_mutex_lock(&w->mu);
+    if (w->nqueued < 256) w->queued[w->nqueued++] = hdr;
+    pthread_mutex_unlock(&w->mu);
+    AudioQueueEnqueueBuffer(w->aq, b, 0, NULL);
+    if (!w->started && !w->paused) { AudioQueueStart(w->aq, NULL); w->started = 1; }
+    RET(0);
+}
+void I_winmm_dll_waveOutPause(CPU *c) { WaveOut *w = PTR(A0); if (!w) { RET(5); return; } AudioQueuePause(w->aq); w->paused = 1; RET(0); }
+void I_winmm_dll_waveOutRestart(CPU *c) {
+    WaveOut *w = PTR(A0); if (!w) { RET(5); return; }
+    w->paused = 0; AudioQueueStart(w->aq, NULL); w->started = 1; RET(0);
+}
+// waveOutReset: stop, and every queued buffer is done
+void I_winmm_dll_waveOutReset(CPU *c) {
+    WaveOut *w = PTR(A0); if (!w) { RET(5); return; }
+    AudioQueueStop(w->aq, true); w->started = 0; w->paused = 0;
+    for (;;) {
+        pthread_mutex_lock(&w->mu);
+        uint64_t hdr = w->nqueued ? w->queued[0] : 0;
+        pthread_mutex_unlock(&w->mu);
+        if (!hdr) break;
+        wo_done(w, hdr);
+    }
+    RET(0);
+}
+// waveOutSetVolume(hwo, volume): left in the low word, right in the high word (0 - 0xFFFF); one gain for both
+void I_winmm_dll_waveOutSetVolume(CPU *c) {
+    WaveOut *w = PTR(A0); uint32_t v = (uint32_t)A1;
+    float g = ((v & 0xFFFF) + (v >> 16)) / (2.0f * 65535.0f);
+    if (w) AudioQueueSetParameter(w->aq, kAudioQueueParam_Volume, g);
+    RET(0);
+}
+void I_winmm_dll_waveOutClose(CPU *c) {
+    WaveOut *w = PTR(A0); if (!w) { RET(5); return; }
+    if (w->nqueued) { RET(33); return; }   // WAVERR_STILLPLAYING: reset first
+    AudioQueueDispose(w->aq, true);
+    wo_notify(w, WOM_CLOSE, 0);
+    pthread_mutex_destroy(&w->mu);
+    free(w);   // the guest CPU (CALLBACK_FUNCTION) is kept: the queue's thread may still be inside a callback
+    RET(0);
 }

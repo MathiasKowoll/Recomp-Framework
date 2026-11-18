@@ -35,7 +35,10 @@ void xreverb_set(XReverb *r, const void *params);
 void xreverb_get(const XReverb *r, void *params);
 void xreverb_process(XReverb *r, const float *in, int in_ch, float *out, int out_ch, int n);
 enum { FX_REVERB = 1, FX_METER = 2 };
-typedef struct { uint64_t vtbl; uint32_t refs; int kind; XReverb *rv; } Xapo;
+typedef struct {
+    uint64_t vtbl; uint32_t refs; int kind; XReverb *rv;
+    float m_peak[8]; double m_sq[8]; uint32_t m_frames, m_ch;   // volume meter: since the last GetParameters (xmu)
+} Xapo;
 #define REVERB_PARAMS_SIZE 52       // XAUDIO2FX_REVERB_PARAMETERS (2.7)
 #define MAXSEND 4
 #define MAXFX 4
@@ -355,6 +358,14 @@ static const float *apply_fx(CPU *cpu, Voice *v, const float *in, uint32_t *ch) 
                 for (int f = 0; f < PASS_FRAMES; f++) for (uint32_t d = 0; d < oc; d++) {
                     float acc = 0; for (uint32_t k = 0; k < c; k++) acc += cur[(size_t)f * c + k] * g[d * c + k];
                     dst[(size_t)f * oc + d] = acc; } }
+            // measure what it passes on, per channel
+            uint32_t mc = oc < 8 ? oc : 8;
+            if (x->m_ch != mc) { memset(x->m_peak, 0, sizeof x->m_peak); memset(x->m_sq, 0, sizeof x->m_sq); x->m_frames = 0; x->m_ch = mc; }
+            for (int f = 0; f < PASS_FRAMES; f++) for (uint32_t k = 0; k < mc; k++) {
+                float a = dst[(size_t)f * oc + k];
+                if (fabsf(a) > x->m_peak[k]) x->m_peak[k] = fabsf(a);
+                x->m_sq[k] += (double)a * a; }
+            x->m_frames += PASS_FRAMES;
         }
         cur = dst; c = oc; dst = dst == fx_a ? fx_b : fx_a;
     }
@@ -544,7 +555,8 @@ static void fx_set_params(Xapo *x, uint64_t p, uint32_t sz) {
                    (void *)x, rdf(p), rd32(p + 4), rd8(p + 8), rdf(p + 40), rdf(p + 44), rdf(p + 48), rdf(p + 32), rdf(p + 36));
     }
 }
-// XAUDIO2FX_VOLUMEMETER_LEVELS (packed): pPeakLevels +0, pRMSLevels +8, ChannelCount +16: no levels measured, zeros
+// XAUDIO2FX_VOLUMEMETER_LEVELS (packed): pPeakLevels +0, pRMSLevels +8, ChannelCount +16. A meter reports the peak
+// and RMS of each channel since it was last read (zeros for channels it hasn't seen), then starts again.
 static void fx_get_params(Xapo *x, uint64_t p, uint32_t sz) {
     if (!x || !p) return;
     if (x->kind == FX_REVERB) {
@@ -553,7 +565,19 @@ static void fx_get_params(Xapo *x, uint64_t p, uint32_t sz) {
         memcpy(PTR(p), tmp, sz < REVERB_PARAMS_SIZE ? sz : REVERB_PARAMS_SIZE);
     } else if (sz >= 20) {
         uint64_t peak = rd64(p), rms = rd64(p + 8); uint32_t n = rd32(p + 16);
-        for (uint32_t i = 0; i < n && i < 64; i++) { if (peak) wrf(peak + 4ull * i, 0); if (rms) wrf(rms + 4ull * i, 0); }
+        float pk[8] = { 0 }, rm[8] = { 0 };
+        pthread_mutex_lock(&xmu);
+        for (uint32_t i = 0; i < x->m_ch; i++) {
+            pk[i] = x->m_peak[i];
+            rm[i] = x->m_frames ? (float)sqrt(x->m_sq[i] / x->m_frames) : 0;
+            x->m_peak[i] = 0; x->m_sq[i] = 0;
+        }
+        x->m_frames = 0;
+        pthread_mutex_unlock(&xmu);
+        for (uint32_t i = 0; i < n && i < 64; i++) {
+            if (peak) wrf(peak + 4ull * i, i < 8 ? pk[i] : 0);
+            if (rms) wrf(rms + 4ull * i, i < 8 ? rm[i] : 0);
+        }
     }
 }
 // SetEffectParameters(this, index, params, size, opset) / GetEffectParameters(this, index, params, size)

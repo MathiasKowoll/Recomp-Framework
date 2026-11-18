@@ -757,3 +757,164 @@ void I_kernel32_dll_LocalSize(CPU *c) { RET(A0 ? rt_heap_size(PTR(A0)) : 0); }
 // GlobalReAlloc/LocalReAlloc(mem, bytes, flags): GMEM_ZEROINIT 0x40 (fixed memory only: handles are pointers)
 void I_kernel32_dll_GlobalReAlloc(CPU *c) { RET(G(rt_heap_realloc(PTR(A0), A1, ((uint32_t)A2 & 0x40) != 0))); }
 void I_kernel32_dll_LocalReAlloc(CPU *c) { RET(G(rt_heap_realloc(PTR(A0), A1, ((uint32_t)A2 & 0x40) != 0))); }
+
+// ---------------- version checks ----------------
+// VerSetConditionMask(mask, typeMask, condition): 3 bits per type, at the position of typeMask's lowest set bit
+void I_kernel32_dll_VerSetConditionMask(CPU *c) {
+    uint64_t mask = A0; uint32_t type = (uint32_t)A1; uint8_t cond = (uint8_t)A2;
+    if (type) { int idx = __builtin_ctz(type); if (idx < 8) mask |= (uint64_t)(cond & 7) << (idx * 3); }
+    RET(mask);
+}
+// VerifyVersionInfoA(OSVERSIONINFOEXA*, typeMask, conditionMask) against the Windows 10 the runtime reports
+// (10.0.19045, service pack 0). OSVERSIONINFOEXA: dwMajorVersion +4, dwMinorVersion +8, dwBuildNumber +12,
+// dwPlatformId +16, szCSDVersion[128] +20, wServicePackMajor +148, wServicePackMinor +150.
+static int ver_cond(uint64_t mask, int idx, uint64_t have, uint64_t want) {
+    switch ((mask >> (idx * 3)) & 7) {
+    case 1: return have == want;   // VER_EQUAL
+    case 2: return have > want;    // VER_GREATER
+    case 3: return have >= want;   // VER_GREATER_EQUAL
+    case 4: return have < want;    // VER_LESS
+    case 5: return have <= want;   // VER_LESS_EQUAL
+    }
+    return 1;
+}
+// The W form is the same up to szCSDVersion, which is WCHAR[128]: wServicePackMajor is at +276.
+static void verify_version(CPU *c, uint32_t sp_off);
+void I_kernel32_dll_VerifyVersionInfoA(CPU *c) { verify_version(c, 148); }
+void I_kernel32_dll_VerifyVersionInfoW(CPU *c) { verify_version(c, 276); }
+static void verify_version(CPU *c, uint32_t sp_off) {
+    uint64_t vi = A0, mask = AN(2); uint32_t type = (uint32_t)A1;
+    // major.minor.servicepack compare together when they're all asked for, as Windows does
+    uint64_t have = ((uint64_t)10 << 32), want = ((uint64_t)rd32(vi + 4) << 32) | ((uint64_t)rd32(vi + 8) << 16) | rd16(vi + sp_off);
+    int ok = 1;
+    if (type & 0x23) {   // VER_MAJORVERSION | VER_MINORVERSION | VER_SERVICEPACKMAJOR
+        int idx = (type & 0x2) ? 1 : (type & 0x1) ? 0 : 5;
+        ok = ver_cond(mask, idx, have, want);
+    }
+    if (ok && (type & 0x4)) ok = ver_cond(mask, 2, 19045, rd32(vi + 12));     // VER_BUILDNUMBER
+    if (ok && (type & 0x8)) ok = ver_cond(mask, 3, 2, rd32(vi + 16));         // VER_PLATFORMID: VER_PLATFORM_WIN32_NT
+    if (!ok) set_last_error(1150);                                            // ERROR_OLD_WIN_VERSION
+    RET(ok);
+}
+
+// ---------------- file mappings ----------------
+// CreateFileMappingA(file, sa, protect, sizeHigh, sizeLow, name): anonymous (file = INVALID_HANDLE_VALUE) memory, or a
+// file's contents read into memory (a private copy: writes through the view are not written back). Named mappings are
+// shared within the process; a second create of a name returns the same object with ERROR_ALREADY_EXISTS.
+#include "handles.h"
+#include <sys/stat.h>
+typedef struct { void *mem; uint64_t size; char name[128]; } Mapping;
+static pthread_mutex_t map_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct { char name[128]; uint64_t handle; } named_maps[64];   // named mappings, for a second create of a name
+static void mapping_close(HObj *o) {
+    Mapping *m = o->data;
+    if (m) {
+        pthread_mutex_lock(&map_mu);
+        for (int i = 0; i < 64; i++) if (named_maps[i].handle == o->handle) named_maps[i].handle = 0;
+        pthread_mutex_unlock(&map_mu);
+        free(m->mem); free(m);
+    }
+    o->data = NULL;
+}
+void I_kernel32_dll_CreateFileMappingA(CPU *c) {
+    uint64_t file = A0, size = ((uint64_t)(uint32_t)AN(3) << 32) | (uint32_t)AN(4), pname = AN(5);
+    const char *name = pname ? (const char *)PTR(pname) : NULL;
+    if (name && *name) {   // the same name again: the same mapping
+        pthread_mutex_lock(&map_mu);
+        for (int i = 0; i < 64; i++) {
+            if (!named_maps[i].handle || strcmp(named_maps[i].name, name)) continue;
+            HObj *o = h_get(named_maps[i].handle);
+            if (o && o->close == mapping_close) {
+                o->refs++; uint64_t h = named_maps[i].handle;
+                pthread_mutex_unlock(&map_mu); set_last_error(183); RET(h); return;   // ERROR_ALREADY_EXISTS
+            }
+        }
+        pthread_mutex_unlock(&map_mu);
+    }
+    Mapping *m = calloc(1, sizeof *m);
+    if (file != ~0ull && file) {
+        HObj *f = h_get(file);
+        if (!f || f->type != HT_FILE) { free(m); set_last_error(6); RET(0); return; }   // ERROR_INVALID_HANDLE
+        struct stat st; if (fstat(f->fd, &st)) { free(m); set_last_error(5); RET(0); return; }
+        if (!size) size = (uint64_t)st.st_size;
+        m->mem = calloc(1, size ? size : 1);
+        if (m->mem && st.st_size) pread(f->fd, m->mem, (size_t)((uint64_t)st.st_size < size ? (uint64_t)st.st_size : size), 0);
+    } else {
+        if (!size) { free(m); set_last_error(87); RET(0); return; }   // ERROR_INVALID_PARAMETER
+        m->mem = calloc(1, size);
+    }
+    if (!m->mem) { free(m); set_last_error(8); RET(0); return; }   // ERROR_NOT_ENOUGH_MEMORY
+    m->size = size;
+    if (name) snprintf(m->name, sizeof m->name, "%s", name);
+    HObj *o = h_alloc(HT_OTHER);
+    o->data = m; o->close = mapping_close;
+    uint64_t h = h_new(o);
+    if (name && *name) {
+        pthread_mutex_lock(&map_mu);
+        for (int i = 0; i < 64; i++) if (!named_maps[i].handle) { snprintf(named_maps[i].name, sizeof named_maps[i].name, "%s", name); named_maps[i].handle = h; break; }
+        pthread_mutex_unlock(&map_mu);
+    }
+    set_last_error(0);
+    RET(h);
+}
+// MapViewOfFile(mapping, access, offsetHigh, offsetLow, bytes): views share the mapping's memory
+void I_kernel32_dll_MapViewOfFile(CPU *c) {
+    HObj *o = h_get(A0);
+    if (!o || o->close != mapping_close || !o->data) { set_last_error(6); RET(0); return; }
+    Mapping *m = o->data; uint64_t off = ((uint64_t)(uint32_t)A2 << 32) | (uint32_t)A3;
+    if (off > m->size) { set_last_error(87); RET(0); return; }
+    RET(G((uint8_t *)m->mem + off));
+}
+void I_kernel32_dll_MapViewOfFileEx(CPU *c) { I_kernel32_dll_MapViewOfFile(c); }
+void I_kernel32_dll_UnmapViewOfFile(CPU *c) { RET(1); }   // the memory belongs to the mapping (freed when it closes)
+
+// ---------------- messages and processes ----------------
+// FormatMessageA(flags, source, id, lang, buffer, size, args): system messages as "Error <n>." (no message
+// tables); FORMAT_MESSAGE_ALLOCATE_BUFFER (0x100) returns a LocalAlloc'd buffer through buffer
+void I_kernel32_dll_FormatMessageA(CPU *c) {
+    uint32_t flags = (uint32_t)A0, id = (uint32_t)A2, size = (uint32_t)AN(5); uint64_t buf = AN(4);
+    char text[96];
+    if (flags & 0x800) { set_last_error(317); RET(0); return; }   // FROM_HMODULE: no message tables (ERROR_MR_MID_NOT_FOUND)
+    if (flags & 0x400) snprintf(text, sizeof text, "%s", (const char *)PTR(A1));   // FROM_STRING (inserts left as is)
+    else snprintf(text, sizeof text, id == 0 ? "The operation completed successfully.\r\n" : "Error %u.\r\n", id);
+    size_t n = strlen(text);
+    if (flags & 0x100) {
+        char *p = rt_heap_alloc(n + 1 > size ? n + 1 : size, 0);
+        if (!p) { set_last_error(8); RET(0); return; }
+        memcpy(p, text, n + 1); wr64(buf, G(p));
+    } else {
+        if (!buf || size <= n) { set_last_error(122); RET(0); return; }   // ERROR_INSUFFICIENT_BUFFER
+        memcpy(PTR(buf), text, n + 1);
+    }
+    RET(n);
+}
+#define SELF_PID 0x1000   // what GetCurrentProcessId reports (teb.c)
+// OpenProcess(access, inherit, pid): this process only (its pseudo handle); GetProcessId(handle)
+void I_kernel32_dll_OpenProcess(CPU *c) { if ((uint32_t)A2 == SELF_PID) { RET(~0ull); return; } set_last_error(87); RET(0); }
+void I_kernel32_dll_GetProcessId(CPU *c) { if (A0 == ~0ull) { RET(SELF_PID); return; } set_last_error(6); RET(0); }
+
+// ---------------- psapi: this process and its modules ----------------
+// EnumProcesses(pids, bytes, *needed)
+void I_psapi_dll_EnumProcesses(CPU *c) {
+    if ((uint32_t)A1 >= 4 && A0) wr32(A0, SELF_PID);
+    if (A2) wr32(A2, 4);
+    RET(1);
+}
+// EnumProcessModules(process, modules, bytes, *needed): the executable's image
+void I_psapi_dll_EnumProcessModules(CPU *c) {
+    if ((uint32_t)A2 >= 8 && A1) wr64(A1, gimage_base);
+    if (A3) wr32(A3, 8);
+    RET(1);
+}
+// GetModuleBaseNameA(process, module, name, size): the module file's name, as GetModuleFileName gives it
+void I_psapi_dll_GetModuleBaseNameA(CPU *c) {
+    char p[512]; module_path(A1 ? A1 : gimage_base, p, sizeof p);
+    const char *b = strrchr(p, '\\'); b = b ? b + 1 : p;
+    uint32_t n = (uint32_t)AN(3); if (!n || !A2) { RET(0); return; }
+    size_t l = strlen(b); if (l >= n) l = n - 1;
+    memcpy(PTR(A2), b, l); wr8(A2 + l, 0);
+    RET(l);
+}
+
+// GetProfileIntA(app, key, default): there is no win.ini, so the default
+void I_kernel32_dll_GetProfileIntA(CPU *c) { RET((uint32_t)A2); }

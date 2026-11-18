@@ -40,7 +40,6 @@ game.c + runtime/ ──────────────────clang─
 | `tools/gen_steam_slots.py` | Generates the per-slot stubs of the Steam interfaces (`runtime/steam_slots.h`) |
 | `tools/make_app.py`, `tools/app_icon.py` | App bundle packaging |
 | `tools/nsr.py` | **NightSight Recomp (NSR)**: one Steam Play compatibility tool for every recomp (needs [NotProton](https://github.com/NotProtonNot/NotProton)). Each game's own Steam entry starts its app, with the Steam overlay and NotProton plugins; see [Steam Play](#steam-play-nightsight-recomp-nsr) |
-| `tools/steam_play_tool.py` | The older one-tool-per-game registration (kept for existing installers) |
 | `runtime/` | The native runtime: execution core and the Windows platform layer |
 | `runtime/game.h` | The per-game settings interface |
 | `tests/` | Differential instruction fuzzer (`insn_fuzz.py`, MMX: `mmx_fuzz.py`), offline Vulkan shader harness |
