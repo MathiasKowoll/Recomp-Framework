@@ -93,8 +93,8 @@ $(BUILD)/game/%.o: %.c $(FW_HDR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # The guest image range is reserved inside the executable as zero-fill segments (rt.c): the exe at its
-# preferred base 0x140000000, translated DLLs at 0x180000000.
-LDFLAGS ?= $(ARCH) -Wl,-export_dynamic -Wl,-segaddr,__GUEST,0x140000000 -Wl,-segaddr,__GUESTDLL,0x180000000 \
+# preferred base 0x140000000, translated DLLs at 0x160000000 (rebased: 0x180000000 is the arm64 shared cache's range).
+LDFLAGS ?= $(ARCH) -Wl,-export_dynamic -Wl,-segaddr,__GUEST,0x140000000 -Wl,-segaddr,__GUESTDLL,0x160000000 \
            -framework CoreGraphics -framework CoreFoundation -framework AppKit -framework QuartzCore \
            -framework AudioToolbox -framework CoreAudio -framework GameController -framework CoreHaptics -framework Metal \
            -framework OpenGL -framework IOSurface
@@ -132,17 +132,23 @@ fuzz:
 MESA_DIR ?= external/mesa
 MESA_REF ?= main
 KK_STAGE = $(BUILD)/kosmickrisp
+# The driver targets the app's minimum macOS, like the runtime: without it, clang targets the build Mac's macOS,
+# its @available(macOS 27, *) checks compile to "always", and on macOS 26 Metal throws on the first texture view
+# (-[MTLTextureViewDescriptor setMinLOD:]: unrecognized selector). Meson keeps these from the first setup:
+# remove $(MESA_DIR)/build after changing MACOS_MIN.
+KK_MIN = -mmacosx-version-min=$(MACOS_MIN)
 kosmickrisp:
 	@test -d $(MESA_DIR) || git clone --depth 1 --branch $(MESA_REF) https://gitlab.freedesktop.org/mesa/mesa.git $(MESA_DIR)
 	@test -x external/mesa-venv/bin/python || { /opt/homebrew/bin/python3 -m venv external/mesa-venv && external/mesa-venv/bin/pip install -q mako packaging pyyaml; }
-	@test -d $(MESA_DIR)/build || PATH="/opt/homebrew/opt/llvm/bin:$(CURDIR)/external/mesa-venv/bin:$$PATH" meson setup $(MESA_DIR)/build $(MESA_DIR) \
+	@test -d $(MESA_DIR)/build || MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN) PATH="/opt/homebrew/opt/llvm/bin:$(CURDIR)/external/mesa-venv/bin:$$PATH" meson setup $(MESA_DIR)/build $(MESA_DIR) \
 	    --prefix=$(CURDIR)/external/kk-install --buildtype=release -Db_ndebug=true -Dplatforms=macos -Dvulkan-drivers=kosmickrisp \
-	    -Dgallium-drivers= -Dopengl=false -Dzstd=disabled --prefer-static --pkg-config-path=/usr/local/lib/pkgconfig
+	    -Dgallium-drivers= -Dopengl=false -Dzstd=disabled --prefer-static --pkg-config-path=/usr/local/lib/pkgconfig \
+	    -Dc_args=$(KK_MIN) -Dcpp_args=$(KK_MIN) -Dobjc_args=$(KK_MIN) -Dc_link_args=$(KK_MIN) -Dcpp_link_args=$(KK_MIN) -Dobjc_link_args=$(KK_MIN)
 	@for p in $(abspath $(FW))/patches/mesa/*.patch; do \
 	    git -C $(MESA_DIR) apply --reverse --check "$$p" 2>/dev/null && continue; \
 	    git -C $(MESA_DIR) apply "$$p" && echo "applied $$(basename $$p)" || exit 1; \
 	done
-	PATH="/opt/homebrew/opt/llvm/bin:$(CURDIR)/external/mesa-venv/bin:$$PATH" ninja -C $(MESA_DIR)/build install
+	MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN) PATH="/opt/homebrew/opt/llvm/bin:$(CURDIR)/external/mesa-venv/bin:$$PATH" ninja -C $(MESA_DIR)/build install
 	rm -rf $(KK_STAGE) && mkdir -p $(KK_STAGE)/drirc.d
 	cp external/kk-install/lib/libvulkan_kosmickrisp.dylib $(KK_STAGE)/
 	cp /usr/local/lib/libvulkan.1.dylib $(KK_STAGE)/
@@ -160,9 +166,10 @@ clean:
 
 # ---- extra translated DLLs (game DLLs that contain code) ----
 # $(call MODULE_RULES,name,dll,dir,extra translator options,extra cflags) defines `gen-<name>` and
-# $(BUILD)/lib<name>.a; add the library to EXTRA_LIBS_FORCE. A DLL whose preferred base collides with another
-# one is translated rebased (--rebase <hex>). Example:
-#   $(eval $(call MODULE_RULES,bink2w64,orig_bink.dll,gen_bink,--rebase 182000000 --no-abi-trim,-DRT_TSO=0))
+# $(BUILD)/lib<name>.a; add the library to EXTRA_LIBS_FORCE. DLLs are translated rebased (--rebase <hex>) into
+# the DLL range at 0x160000000-0x164000000: their usual preferred base, 0x180000000, is where arm64 macOS maps
+# its shared cache. Example:
+#   $(eval $(call MODULE_RULES,bink2w64,orig_bink.dll,gen_bink,--rebase 162000000 --no-abi-trim,-DRT_TSO=0))
 #   EXTRA_LIBS_FORCE += $(BUILD)/libbink2w64.a
 define MODULE_RULES
 gen-$(1):
