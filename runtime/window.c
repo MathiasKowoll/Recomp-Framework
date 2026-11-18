@@ -7,6 +7,7 @@
 // TranslateMessage is a no-op: WM_CHAR/WM_SYSCHAR are posted right after their WM_KEYDOWN.
 #include "rt.h"
 #include "cocoa.h"
+#include "game.h"
 #include <pthread.h>
 #include <unistd.h>
 #include <strings.h>
@@ -363,7 +364,7 @@ static uint64_t def_proc(CPU *c, uint64_t h, uint32_t msg, uint64_t wp, uint64_t
     case WM_NCHITTEST: return 1;           // HTCLIENT
     // over the client area, Windows puts the class cursor back (if the class has one) on every mouse move:
     // a game that hid the cursor with SetCursor(NULL) and leaves WM_SETCURSOR to DefWindowProc gets it back
-    case WM_SETCURSOR: if ((lp & 0xFFFF) == 1 && w && w->cls && w->cls->cursor) apply_cursor(w->cls->cursor); return 0;
+    case WM_SETCURSOR: if (rt_game.win32_cursors && (lp & 0xFFFF) == 1 && w && w->cls && w->cls->cursor) apply_cursor(w->cls->cursor); return 0;
     case WM_NCACTIVATE: return 1;
     case WM_MOUSEACTIVATE: return 1;       // MA_ACTIVATE
     case WM_ERASEBKGND: return 1;
@@ -864,12 +865,12 @@ void I_user32_dll_ShowOwnedPopups(CPU *c) { RET(1); }
 // ---------------- cursor ----------------
 static int cursor_count;
 void *rt_cursor_native(uint64_t h);   // user32.c
-// SetCursor(h): a custom cursor (CreateIconIndirect) shows its image; a system cursor the arrow; NULL no image
-// the on-screen cursor: a custom one (CreateIconIndirect) shows its image; a system cursor the arrow; NULL none
+// SetCursor(h): with rt_game.win32_cursors, a custom cursor (CreateIconIndirect) shows its image, a system cursor
+// the arrow and NULL no image; without it the handle is only recorded (GetCursor returns it)
 static void apply_cursor(uint64_t h) {
     if (h == g_cursor) return;
     g_cursor = h;
-    cocoa_cursor_set(rt_cursor_native(h), h == 0);
+    if (rt_game.win32_cursors) cocoa_cursor_set(rt_cursor_native(h), h == 0);
 }
 void I_user32_dll_SetCursor(CPU *c) {
     uint64_t prev = g_cursor;

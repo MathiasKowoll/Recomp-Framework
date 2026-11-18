@@ -23,6 +23,11 @@ typedef struct {
                                    // there (e.g. a DRM-free copy of the exe made at build time); else <game folder>/<exe>
     const char *gl_extensions;     // OpenGL games: extra names for GL_EXTENSIONS, space-separated (e.g. an extension
                                    // the engine checks before loading entry points that the core profile has anyway)
+    // Opt-in Win32 behaviour (0 keeps the older behaviour that existing ports were built and tested against):
+    int windows_env;               // GetEnvironmentVariable reports a Windows environment (LOCALAPPDATA, APPDATA, TEMP,
+                                   // USERNAME, SystemRoot... in the virtual C:); 0: only DXVK_/MESA_/VKD3D_ host variables
+    int win32_cursors;             // SetCursor changes the on-screen cursor (custom cursors from CreateIconIndirect,
+                                   // SetCursor(NULL) hides it), and mouse moves send WM_SETCURSOR, as on Windows (UE4)
 } RtGame;
 
 extern const RtGame rt_game;

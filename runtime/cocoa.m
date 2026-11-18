@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 #include <pthread.h>
 #include "cocoa.h"
+#include "game.h"
 void rt_log(const char *fmt, ...);
 
 enum {
@@ -107,8 +108,9 @@ static void app_init(void) {   // main thread
 - (BOOL)isFlipped { return YES; }
 // The guest's cursor (SetCursor) as this view's cursor rect: AppKit re-applies a view's cursor whenever the mouse
 // enters or moves in it, and would otherwise put the arrow back over our [NSCursor set].
-- (void)resetCursorRects { [self addCursorRect:self.bounds cursor:(g_cur ?: [NSCursor arrowCursor])]; }
-- (void)cursorUpdate:(NSEvent *)e { [(g_cur ?: [NSCursor arrowCursor]) set]; }
+// Only with rt_game.win32_cursors: other games keep AppKit's default cursor handling.
+- (void)resetCursorRects { if (rt_game.win32_cursors) [self addCursorRect:self.bounds cursor:(g_cur ?: [NSCursor arrowCursor])]; }
+- (void)cursorUpdate:(NSEvent *)e { if (rt_game.win32_cursors) [(g_cur ?: [NSCursor arrowCursor]) set]; else [super cursorUpdate:e]; }
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)acceptsFirstMouse:(NSEvent *)e { return YES; }
 
@@ -146,7 +148,7 @@ static uint64_t mk_flags(NSEvent *e) {
     // Windows sends WM_SETCURSOR(hwnd, HTCLIENT | WM_MOUSEMOVE << 16) before each mouse move; UE4 picks and sets
     // its cursor in response. Sent at most every 50 ms so moves still coalesce in the queue.
     static uint64_t last_sc; uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    if (now - last_sc > 50000000ull) { last_sc = now; win_from_cocoa(self.hwnd, 0x20, self.hwnd, 1 | (uint64_t)WM_MOUSEMOVE << 16); }
+    if (rt_game.win32_cursors && now - last_sc > 50000000ull) { last_sc = now; win_from_cocoa(self.hwnd, 0x20, self.hwnd, 1 | (uint64_t)WM_MOUSEMOVE << 16); }
     win_from_cocoa(self.hwnd, WM_MOUSEMOVE, mk_flags(e), [self clientPos:e]);
 }
 - (void)mouseMoved:(NSEvent *)e { [self moved:e]; }

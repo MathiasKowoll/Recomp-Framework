@@ -385,7 +385,7 @@ void I_kernel32_dll_DeleteCriticalSection(CPU *c) { }
 static const uint16_t env_block[] = { 0, 0 };
 void I_kernel32_dll_GetEnvironmentStringsW(CPU *c) { RET(G(env_block)); }
 void I_kernel32_dll_FreeEnvironmentStringsW(CPU *c) { RET(1); }
-// The guest environment: the usual Windows variables, pointing into the virtual C: drive (files.c maps C:\users\Player
+// The guest environment: with rt_game.windows_env, the usual Windows variables, pointing into the virtual C: drive (files.c maps C:\users\Player
 // and C:\Temp under ~/Library/Application Support/<data_name>/c), plus host variables meant for the translated
 // graphics stack (DXVK_*, MESA_*, VKD3D_*). Windows variable names are case-insensitive.
 const char *rt_guest_env(const char *name) {
@@ -397,8 +397,10 @@ const char *rt_guest_env(const char *name) {
         { "SystemRoot", "C:\\Windows" }, { "windir", "C:\\Windows" }, { "OS", "Windows_NT" },
         { "PROCESSOR_ARCHITECTURE", "AMD64" }, { "COMPUTERNAME", "MAC" },
     };
-    for (size_t i = 0; i < sizeof fixed / sizeof *fixed; i++) if (!strcasecmp(name, fixed[i].n)) return fixed[i].v;
-    if (!strcasecmp(name, "NUMBER_OF_PROCESSORS")) { static char nb[16]; snprintf(nb, sizeof nb, "%u", rt_ncpu()); return nb; }
+    if (rt_game.windows_env) {
+        for (size_t i = 0; i < sizeof fixed / sizeof *fixed; i++) if (!strcasecmp(name, fixed[i].n)) return fixed[i].v;
+    }
+    if (rt_game.windows_env && !strcasecmp(name, "NUMBER_OF_PROCESSORS")) { static char nb[16]; snprintf(nb, sizeof nb, "%u", rt_ncpu()); return nb; }
     if (!strncasecmp(name, "DXVK_", 5) || !strncasecmp(name, "MESA_", 5) || !strncasecmp(name, "VKD3D_", 6)) return getenv(name);
     return NULL;
 }
