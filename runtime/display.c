@@ -9,12 +9,13 @@
 #include <math.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <pthread.h>
+#include "cocoa.h"
 
 #define HMON_BASE 0x4D4F4E0000000000ull   // fake HMONITOR: base | (index + 1)
 #define MAXD 16
 
 typedef struct { uint32_t w, h, hz; } Mode;
-typedef struct { CGDirectDisplayID id; int32_t x, y; uint32_t w, h, hz; uint32_t nw, nh; Mode *modes; int nmodes; uint32_t capw, caph; } Disp;   // w,h: current (maybe emulated); nw,nh: native
+typedef struct { CGDirectDisplayID id; int32_t x, y; uint32_t w, h, hz; uint32_t nw, nh, dw, dh; Mode *modes; int nmodes; uint32_t capw, caph; } Disp;   // w,h: current (maybe emulated); nw,nh: native; dw,dh: desktop (native unless RT_DESKTOP)
 static Disp disps[MAXD];
 static int ndisp;
 static pthread_once_t disp_once = PTHREAD_ONCE_INIT;
@@ -101,8 +102,15 @@ static void disp_init(void) {
             }
         }
         if (all) CFRelease(all);
-        d->nw = d->w; d->nh = d->h;
+        d->nw = d->dw = d->w; d->nh = d->dh = d->h;
         add_mode(d, d->w, d->h, d->hz);
+        // RT_DESKTOP=WxH: the primary display's desktop is emulated at W x H from the start, so a game in
+        // borderless fullscreen renders at W x H and macOS scales the result to the real screen
+        unsigned ew = 0, eh = 0; const char *ed = getenv("RT_DESKTOP");
+        if (!ndisp && ed && sscanf(ed, "%ux%u", &ew, &eh) == 2 && ew >= 640 && eh >= 480 && (ew != d->w || eh != d->h)) {
+            d->dw = d->w = ew; d->dh = d->h = eh;
+            add_mode(d, ew, eh, d->hz);
+        }
         qsort(d->modes, d->nmodes, sizeof(Mode), mode_cmp);
         rt_log("[display] DISPLAY%d: %ux%u @ %u Hz at (%d,%d)%s, %d modes\n", ndisp + 1, d->w, d->h, d->hz, d->x, d->y,
                ndisp ? "" : " primary", d->nmodes);
@@ -110,6 +118,10 @@ static void disp_init(void) {
         ndisp++;
     }
     CFRelease(opts);
+    if (ndisp && (disps[0].dw != disps[0].nw || disps[0].dh != disps[0].nh)) {
+        rt_log("[display] RT_DESKTOP: desktop %ux%u, scaled to the %ux%u screen\n", disps[0].dw, disps[0].dh, disps[0].nw, disps[0].nh);
+        cocoa_set_virtual_screen((int)disps[0].dw, (int)disps[0].dh);
+    }
 }
 static int disp_count(void) { pthread_once(&disp_once, disp_init); return ndisp; }
 static int mon_index(uint64_t h) {
@@ -224,15 +236,14 @@ void I_user32_dll_EnumDisplaySettingsExW(CPU *c) { enum_settings(c, 1); }
 // ChangeDisplaySettings[Ex]: the primary display's mode is emulated, never really switched. Afterwards the
 // game sees the requested size everywhere (metrics, monitor rects, current mode) and cocoa.m scales that
 // mode onto the real screen. A NULL DEVMODE (or the native size) restores the native mode.
-#include "cocoa.h"
 static void change_settings(uint64_t dm, int wide, uint32_t flags) {
     const DevmodeLayout *L = wide ? &DM_W : &DM_A;
     if (!disp_count()) return;
     Disp *d = &disps[0];
-    uint32_t w = d->nw, h = d->nh;
+    uint32_t w = d->dw, h = d->dh;
     if (dm && (rd32(dm + L->fields) & 0x180000u) == 0x180000u) { w = rd32(dm + L->w); h = rd32(dm + L->h); }   // DM_PELSWIDTH | DM_PELSHEIGHT
     if (flags & 2) return;   // CDS_TEST
-    if (!w || !h) { w = d->nw; h = d->nh; }
+    if (!w || !h) { w = d->dw; h = d->dh; }
     if (w == d->w && h == d->h) return;
     d->w = w; d->h = h;
     int native = w == d->nw && h == d->nh;
@@ -246,10 +257,11 @@ static void change_settings(uint64_t dm, int wide, uint32_t flags) {
 void display_restore_desktop(void) {
     if (!disp_count()) return;
     Disp *d = &disps[0];
-    if (d->w == d->nw && d->h == d->nh) return;
-    rt_log("[display] titled window: back to the desktop mode %ux%u\n", d->nw, d->nh);
-    d->w = d->nw; d->h = d->nh;
-    cocoa_set_virtual_screen(0, 0);
+    if (d->w == d->dw && d->h == d->dh) return;
+    rt_log("[display] titled window: back to the desktop mode %ux%u\n", d->dw, d->dh);
+    d->w = d->dw; d->h = d->dh;
+    int native = d->dw == d->nw && d->dh == d->nh;
+    cocoa_set_virtual_screen(native ? 0 : (int)d->dw, native ? 0 : (int)d->dh);
     win_relayout();
 }
 // ChangeDisplaySettingsEx(device, DEVMODE*, hwnd, flags, lparam) / ChangeDisplaySettings(DEVMODE*, flags)

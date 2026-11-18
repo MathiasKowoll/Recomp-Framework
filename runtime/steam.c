@@ -645,6 +645,7 @@ static void cloud_start(void) {
 }
 
 void I_steam_api64_dll_SteamAPI_Init(CPU *c) {
+    if (!app_id) { rt_log("[steam] SteamAPI_Init -> false (no Steam app ID in game.c: the game runs as if Steam were not installed)\n"); RET(0); return; }
     S.online = steam_connect();
     if (S.online) steam_register_pending();
     if (S.online) cloud_start();

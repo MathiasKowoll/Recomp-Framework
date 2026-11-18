@@ -192,7 +192,7 @@ void I_kernel32_dll_GlobalAlloc(CPU *c) { RET(G(rt_heap_alloc(A1, (A0 & 0x40) !=
 #define MEM_DECOMMIT 0x4000
 #define MEM_RELEASE 0x8000
 typedef struct { uint64_t base, size; } Region;
-static Region regions[4096]; static int nregions;
+static Region regions[65536]; static int nregions;
 static pthread_mutex_t vmu = PTHREAD_MUTEX_INITIALIZER;
 static Region *region_of(uint64_t a) {
     for (int i = 0; i < nregions; i++) if (a >= regions[i].base && a < regions[i].base + regions[i].size) return &regions[i];
@@ -204,13 +204,26 @@ void I_kernel32_dll_VirtualAlloc(CPU *c) {
         RET(addr & ~0xFFFull); return;
     }
     if (addr) addr &= ~0xFFFFull;          // reservations start on the 64 KB allocation granularity
-    void *p = mmap(addr ? PTR(addr) : NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    void *p;
+    if (addr) p = mmap(PTR(addr), size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    else {   // Windows reservations are 64 KB aligned, and allocators rely on it (UE4's FMallocBinned2 finds a
+             // block's header by masking its address to 64 KB); mmap only aligns to the 16 KB page, so over-map and trim
+        size_t over = size + 0x10000, pg = (size_t)getpagesize();
+        char *raw = mmap(NULL, over, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (raw == MAP_FAILED) p = MAP_FAILED;
+        else {
+            uint64_t lo = G(raw), al = (lo + 0xFFFF) & ~0xFFFFull, end = lo + over, aend = (al + size + pg - 1) & ~(uint64_t)(pg - 1);
+            if (al > lo) munmap(raw, al - lo);
+            if (end > aend) munmap(PTR(aend), end - aend);
+            p = PTR(al);
+        }
+    }
     if (p == MAP_FAILED || (addr && G(p) != addr)) {   // a fixed address that is not free fails, as on Windows
         if (p != MAP_FAILED) munmap(p, size);
         set_last_error(487); RET(0); return;            // ERROR_INVALID_ADDRESS
     }
     pthread_mutex_lock(&vmu);
-    if (nregions < 4096) regions[nregions++] = (Region){ G(p), size };
+    if (nregions < 65536) regions[nregions++] = (Region){ G(p), size };
     pthread_mutex_unlock(&vmu);
     RET(G(p));
 }
@@ -372,8 +385,40 @@ void I_kernel32_dll_DeleteCriticalSection(CPU *c) { }
 static const uint16_t env_block[] = { 0, 0 };
 void I_kernel32_dll_GetEnvironmentStringsW(CPU *c) { RET(G(env_block)); }
 void I_kernel32_dll_FreeEnvironmentStringsW(CPU *c) { RET(1); }
-void I_kernel32_dll_GetEnvironmentVariableA(CPU *c) { set_last_error(203); RET(0); }
-void I_kernel32_dll_GetEnvironmentVariableW(CPU *c) { set_last_error(203); RET(0); }
+// The guest environment: with rt_game.windows_env, the usual Windows variables, pointing into the virtual C: drive (files.c maps C:\users\Player
+// and C:\Temp under ~/Library/Application Support/<data_name>/c), plus host variables meant for the translated
+// graphics stack (DXVK_*, MESA_*, VKD3D_*). Windows variable names are case-insensitive.
+const char *rt_guest_env(const char *name) {
+    static const struct { const char *n, *v; } fixed[] = {
+        { "LOCALAPPDATA", "C:\\users\\Player\\AppData\\Local" }, { "APPDATA", "C:\\users\\Player\\AppData\\Roaming" },
+        { "USERPROFILE", "C:\\users\\Player" }, { "HOMEDRIVE", "C:" }, { "HOMEPATH", "\\users\\Player" },
+        { "USERNAME", "Player" }, { "TEMP", "C:\\Temp" }, { "TMP", "C:\\Temp" }, { "ProgramData", "C:\\ProgramData" },
+        { "ALLUSERSPROFILE", "C:\\ProgramData" }, { "PUBLIC", "C:\\users\\Public" }, { "SystemDrive", "C:" },
+        { "SystemRoot", "C:\\Windows" }, { "windir", "C:\\Windows" }, { "OS", "Windows_NT" },
+        { "PROCESSOR_ARCHITECTURE", "AMD64" }, { "COMPUTERNAME", "MAC" },
+    };
+    if (rt_game.windows_env) {
+        for (size_t i = 0; i < sizeof fixed / sizeof *fixed; i++) if (!strcasecmp(name, fixed[i].n)) return fixed[i].v;
+    }
+    if (rt_game.windows_env && !strcasecmp(name, "NUMBER_OF_PROCESSORS")) { static char nb[16]; snprintf(nb, sizeof nb, "%u", rt_ncpu()); return nb; }
+    if (!strncasecmp(name, "DXVK_", 5) || !strncasecmp(name, "MESA_", 5) || !strncasecmp(name, "VKD3D_", 6)) return getenv(name);
+    return NULL;
+}
+// GetEnvironmentVariable(name, buffer, size): characters copied (without the null), or the size needed (with it)
+void I_kernel32_dll_GetEnvironmentVariableA(CPU *c) {
+    const char *v = A0 ? rt_guest_env(PTR(A0)) : NULL;
+    if (!v) { set_last_error(203); RET(0); return; }   // ERROR_ENVVAR_NOT_FOUND
+    uint32_t n = (uint32_t)strlen(v), cap = (uint32_t)A2;
+    if (!A1 || cap <= n) { RET(n + 1); return; }
+    memcpy(PTR(A1), v, n + 1); RET(n);
+}
+void I_kernel32_dll_GetEnvironmentVariableW(CPU *c) {
+    char *nm = A0 ? w16_to_utf8(PTR(A0)) : NULL; const char *v = nm ? rt_guest_env(nm) : NULL; free(nm);
+    if (!v) { set_last_error(203); RET(0); return; }
+    uint16_t *w = utf8_to_w16(v); uint32_t n = (uint32_t)w16len(w), cap = (uint32_t)A2;
+    if (!A1 || cap <= n) { free(w); RET(n + 1); return; }
+    memcpy(PTR(A1), w, (n + 1) * 2); free(w); RET(n);
+}
 void I_kernel32_dll_SetEnvironmentVariableA(CPU *c) { RET(1); }
 void I_kernel32_dll_SetEnvironmentVariableW(CPU *c) { RET(1); }
 void I_kernel32_dll_GetACP(CPU *c) { RET(65001); }
@@ -551,6 +596,7 @@ static void module_path(uint64_t h, char *out, size_t n) {
     if (m) snprintf(out, n, "%s\\%s.dll", rt_game.win_dir, m->name);
     else if (sys) snprintf(out, n, "C:\\Windows\\System32\\%s.dll", sys);
     else snprintf(out, n, "%s\\%s", rt_game.win_dir, rt_game.exe);
+    for (char *q = out; *q; q++) if (*q == '/') *q = '\\';   // rt_game.exe uses '/': Windows code splits paths at '\\'
 }
 void I_kernel32_dll_GetModuleFileNameW(CPU *c) {
     char p[512]; module_path(A0, p, sizeof p);
@@ -599,7 +645,7 @@ static uint64_t real_module(CPU *c, const char *name, int load) {
     int has_dir = strchr(name, '\\') || strchr(name, '/') || strchr(name, ':');
     const char *dot = strrchr(name, '.');
     snprintf(win, sizeof win, "%s%s%s%s", has_dir ? "" : rt_game.win_dir, has_dir ? "" : "\\", name, dot && !strpbrk(dot, "\\/") ? "" : ".dll");
-    char *host = rt_host_path(win);
+    char *host = rt_module_file(m, win);
     int ok = host && rt_load_module(m, host);
     free(host);
     if (!ok) { set_last_error(126); return 0; }
@@ -609,7 +655,16 @@ static uint64_t real_module(CPU *c, const char *name, int load) {
     }
     return m->base;
 }
-static uint64_t load_library(CPU *c, const char *name) { uint64_t h = real_module(c, name, 1); return h ? h : pseudo_module(name); }
+static uint64_t load_library(CPU *c, const char *name) {
+    // No Steam app ID (game.c): UE4's Steam plugin loads steam_api64.dll by its full ThirdParty path and must be told
+    // "not there" (it does not survive SteamAPI_Init failing), while the game's own delay-load asks by bare name and
+    // must get the DLL (a delay-load failure throws). The loaded DLL's SteamAPI_Init then reports false.
+    char b[128]; dll_base(name, b, sizeof b);
+    if (!rt_game.steam_app_id && !strcasecmp(b, "steam_api64") && (strchr(name, '\\') || strchr(name, '/'))) {
+        rt_log("[win32] LoadLibrary(%s) -> refused (no Steam app ID: engine plugin disabled)\n", name); set_last_error(126); return 0;
+    }
+    uint64_t h = real_module(c, name, 1); return h ? h : pseudo_module(name);
+}
 static uint64_t module_handle(CPU *c, const char *name) {
     uint64_t h = real_module(c, name, 0);
     if (h) return h;

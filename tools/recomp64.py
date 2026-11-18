@@ -62,7 +62,7 @@ _ASSIGN = r"\s*(?:[-+*/&|^%]|<<|>>)?=(?!=)"
 _GPR_W = re.compile(r"\bR_(\w+)(?:%s|\s*(?:\+\+|--))" % _ASSIGN)
 _XMM_W = re.compile(r"\bX_(\d+)(?:\.\w+(?:\[[^\]]*\])?)?%s" % _ASSIGN)   # X_n =, X_n.f[k] =, X_n.vu =
 # statements that hand control (and the CPU struct) to other code
-_BARRIER = re.compile(r"\b(F_[0-9a-f]+|I_\w+|call_ind|missing_func|bad_insn|bad_jump|cpu_cpuid|cpu_syscall_trap|unimpl_import)"
+_BARRIER = re.compile(r"\b(F_[0-9a-f]+|I_\w+|call_ind|missing_func|bad_insn|bad_jump|cpu_cpuid|cpu_syscall_trap|unimpl_import|rt_setjmp_site)"
                       r"\(c(?:,(?:\"(?:[^\"\\]|\\.)*\"|[^;\"])*)?\);")
 _RETURN = re.compile(r"\breturn;")
 # Win64 ABI: a call preserves rbx, rbp, rsi, rdi, r12-r15 and xmm6-15, so after a call only the volatile
@@ -70,7 +70,7 @@ _RETURN = re.compile(r"\breturn;")
 # runtime never writes those registers except in cpuid (no exceptions or longjmp unwinding exist).
 _VOLATILE_G = {"rax", "rcx", "rdx", "rsp", "r8", "r9", "r10", "r11"}
 _VOLATILE_X = set(range(6))
-_FULL_RELOAD = ("cpu_cpuid", "cpu_syscall_trap")
+_FULL_RELOAD = ("cpu_cpuid", "cpu_syscall_trap", "rt_setjmp_site")   # after a longjmp every register comes back
 ABI_TRIM = "--no-abi-trim" not in sys.argv   # off for hand-written asm-heavy modules (Bink)
 
 # Loads from fixed addresses inside the image's read-only sections (.rdata, .text, .pdata...) read data that never
@@ -199,6 +199,63 @@ class FuncGen:
         for k in range(len(prev) - 1, -1, -1):
             x = prev[k]
             ops = x.operands
+            if x.mnemonic == "movsxd" and len(ops) == 2 and ops[1].type == X.X86_OP_MEM and ops[0].type == X.X86_OP_REG:
+                # GCC/MinGW: lea rB,[rip+T] ; movsxd rX,[rB+rI*4] ; add rX,rB ; jmp rX   (signed entries relative to T)
+                mm = ops[1].mem
+                if mm.index and mm.scale == 4 and mm.base and mm.base != X.X86_REG_RIP and mm.disp == 0:
+                    ta = None
+                    for j in range(k - 1, max(-1, k - 12), -1):
+                        p = prev[j]
+                        po = p.operands
+                        if p.mnemonic == "lea" and len(po) == 2 and po[0].type == X.X86_OP_REG and self.same_gpr(po[0].reg, mm.base) \
+                                and po[1].type == X.X86_OP_MEM and po[1].mem.base == X.X86_REG_RIP and not po[1].mem.index:
+                            ta = p.address + p.size + po[1].mem.disp
+                            break
+                        if po and po[0].type == X.X86_OP_REG and self.same_gpr(po[0].reg, mm.base):
+                            break
+                    if ta is None:   # table base hoisted out of a loop: last write to the base register earlier in the function
+                        for y in sorted((v for v in seen.values() if v and v.address < x.address), key=lambda v: v.address, reverse=True):
+                            yo = y.operands
+                            # pop: an epilogue on a returning path, which cannot reach this jump
+                            if not (yo and yo[0].type == X.X86_OP_REG and self.same_gpr(yo[0].reg, mm.base)) or y.mnemonic in ("cmp", "test", "push", "pop"):
+                                continue
+                            if y.mnemonic == "lea" and len(yo) == 2 and yo[1].type == X.X86_OP_MEM and yo[1].mem.base == X.X86_REG_RIP and not yo[1].mem.index:
+                                ta = y.address + y.size + yo[1].mem.disp
+                            break
+                    if ta is None:   # address order is not path order: any rip-relative lea into the base register whose table validates
+                        cands = []
+                        for y in seen.values():
+                            if not y or y.mnemonic != "lea" or len(y.operands) != 2: continue
+                            yo = y.operands
+                            if yo[0].type == X.X86_OP_REG and self.same_gpr(yo[0].reg, mm.base) and yo[1].type == X.X86_OP_MEM \
+                                    and yo[1].mem.base == X.X86_REG_RIP and not yo[1].mem.index:
+                                cands.append(y.address + y.size + yo[1].mem.disp)
+                        bound0 = self.table_limit(prev, k, mm.index)
+                        good = []
+                        for ca in set(cands):
+                            try: v = struct.unpack("<i", self.pe.read(ca, 4))[0]
+                            except KeyError: continue
+                            t = (ca + v) & 0xFFFFFFFFFFFFFFFF
+                            if self.in_region(t) and t in self.linear_starts() and self.is_code_addr(t) and not self.pe.is_code(ca): good.append(ca)
+                        if len(good) == 1 and bound0: ta = good[0]
+                    if ta is not None:
+                        bound = self.table_limit(prev, k, mm.index)
+                        lim = bound or 2048
+                        starts = self.linear_starts()
+                        tbl = []; n = 0
+                        while n < lim:
+                            try: v = struct.unpack("<i", self.pe.read(ta + 4 * n, 4))[0]
+                            except KeyError: break
+                            n += 1
+                            t = (ta + v) & 0xFFFFFFFFFFFFFFFF
+                            if not self.in_region(t) or t not in starts:
+                                # With a known bound, an entry can point at the shared "default" block outside this
+                                # function (GCC does that); it is simply not a case. Without one, this is where the
+                                # table ends (the next word is data).
+                                if bound: continue
+                                break
+                            tbl.append(t)
+                        return tbl or None
             if x.mnemonic in ("mov", "movsxd") and len(ops) == 2 and ops[1].type == X.X86_OP_MEM and ops[0].type == X.X86_OP_REG:
                 mm = ops[1].mem
                 if mm.index and mm.scale == 4 and mm.base and mm.base != X.X86_REG_RIP and 0 < mm.disp < self.pe.size:
@@ -216,6 +273,20 @@ class FuncGen:
                 return None
         return None
 
+    def is_code_addr(self, a):
+        return self.pe.text_lo <= a < self.pe.text_hi
+
+    def linear_starts(self):
+        """Instruction starts of this function's ranges by linear sweep (GCC code keeps no data inside functions)."""
+        if getattr(self, "_linear_starts", None) is None:
+            st = set()
+            for lo, hi in self.ranges:
+                try: code = self.pe.read(lo, hi - lo)
+                except KeyError: continue
+                st.update(a for a, _, _, _ in self.tr.md.disasm_lite(code, lo))
+            self._linear_starts = st
+        return self._linear_starts
+
     def same_gpr(self, a, b):
         na, nb = REG.get(self.tr.md.reg_name(a)), REG.get(self.tr.md.reg_name(b))
         return na and nb and na[0] == nb[0]
@@ -224,6 +295,19 @@ class FuncGen:
         """Look back for 'cmp idx, N' (guarding ja) -> N+1 entries.  Also follows a byte index table."""
         for j in range(k - 1, max(-1, k - 12), -1):
             p = prev[j]
+            if p.mnemonic in ("mov", "movzx", "movsxd") and len(p.operands) == 2 and p.operands[0].type == X.X86_OP_REG \
+                    and p.operands[1].type == X.X86_OP_REG and self.same_gpr(p.operands[0].reg, idx):
+                idx = p.operands[1].reg   # index copied from another register (movzx eax, dx): follow it to its bound check
+                continue
+            if p.mnemonic in ("mov", "movzx", "movsxd") and len(p.operands) == 2 and p.operands[0].type == X.X86_OP_REG \
+                    and p.operands[1].type == X.X86_OP_MEM and self.same_gpr(p.operands[0].reg, idx) and not p.operands[1].mem.index:
+                # index loaded from memory (mov eax, [rsi+4]): GCC compares the memory operand itself (cmp dword ptr [rsi+4], N)
+                m1 = p.operands[1].mem
+                for q in prev[max(0, j - 6):j][::-1]:
+                    if q.mnemonic == "cmp" and len(q.operands) == 2 and q.operands[0].type == X.X86_OP_MEM and q.operands[1].type == X.X86_OP_IMM:
+                        m0 = q.operands[0].mem
+                        if m0.base == m1.base and m0.disp == m1.disp and not m0.index: return q.operands[1].imm + 1
+                return None
             if p.mnemonic == "cmp" and len(p.operands) == 2 and p.operands[1].type == X.X86_OP_IMM \
                     and p.operands[0].type == X.X86_OP_REG and self.same_gpr(p.operands[0].reg, idx):
                 return p.operands[1].imm + 1
@@ -311,6 +395,12 @@ class FuncGen:
 
     def call(self, i, op, nxt):
         e = self.e
+        # setjmp must run in this function's own native frame (it returns again when longjmp comes back), so the call
+        # becomes an inline site (see funcs.h); the barrier around it reloads every register afterwards
+        if (op.type == X.X86_OP_IMM and op.imm in self.tr.setjmp_thunks) or (op.type == X.X86_OP_MEM and op.mem.base == X.X86_REG_RIP
+                and self.pe.iat.get(i.address + i.size + op.mem.disp, "").split("!")[-1] in ("__intrinsic_setjmp", "_setjmp", "setjmp")):
+            e("PUSH(c, 0x%xull); rt_setjmp_site(c); C.rsp += 8;" % nxt)
+            return
         if op.type == X.X86_OP_IMM:
             t = op.imm
             if t in self.tr.funcs:
@@ -330,7 +420,8 @@ class FuncGen:
     # -- generation --
     def gen(self):
         for i in self.ins:
-            if i.group(cs.CS_GRP_JUMP) and i.operands and i.operands[0].type == X.X86_OP_IMM:
+            # capstone does not put loop/loope/loopne/jrcxz/jecxz in CS_GRP_JUMP, so name them explicitly (their targets need labels)
+            if (i.group(cs.CS_GRP_JUMP) or i.mnemonic in ("loop", "loope", "loopne", "jrcxz", "jecxz")) and i.operands and i.operands[0].type == X.X86_OP_IMM:
                 if i.operands[0].imm in self.addrs: self.labels.add(i.operands[0].imm)
             for t in self.tables.get(i.address, []): self.labels.add(t)
         for k, i in enumerate(self.ins):   # fall-through into a non-adjacent decoded block needs a label
@@ -575,8 +666,10 @@ class FuncGen:
                 e("{ uint64_t v = %s; zf = v == 0; if (v) %s }" % (v, self.wr(d, "%d - __builtin_clz%s(v)" % (63 if n == 8 else 31, fn))))
             elif m == "popcnt":
                 e("{ uint64_t v = %s; %s zf = v == 0; cf = 0; }" % (v, self.wr(d, "__builtin_popcount%s(v)" % fn)))
-            else:
-                raise Unsupported(m)
+            elif m == "tzcnt":   # GCC emits it (rep bsf) for __builtin_ctz even without -mbmi; same result as bsf for v != 0
+                e("{ uint64_t v = %s; uint64_t r = v ? (uint64_t)__builtin_ctz%s(v) : %d; cf = v == 0; zf = r == 0; %s }" % (v, fn, BITS[n], self.wr(d, "r")))
+            else:                # lzcnt
+                e("{ uint64_t v = %s; uint64_t r = v ? (uint64_t)__builtin_clz%s(v) - %d : %d; cf = v == 0; zf = r == 0; %s }" % (v, fn, 0 if n != 2 else 16, BITS[n], self.wr(d, "r")))
             return True
         if m == "bswap":
             d = ops[0]
@@ -1176,6 +1269,7 @@ class Translator:
     def discover(self):
         """Function set: .pdata primaries + direct call targets + code pointers found through relocations."""
         pe = self.pe
+        self.setjmp_conts = set(); self.setjmp_thunks = set()
         starts = set(pe.func_starts) | {pe.entry} | {v for v in pe.exports.values() if pe.is_code(v)}
         lite = cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_64)
         code = pe.read_code()
@@ -1200,6 +1294,21 @@ class Translator:
         for t in calls:
             if pe.is_code(t) and (t in pe.pdata or not inside(t)):
                 starts.add(t)
+        # setjmp continuations: longjmp (runtime) re-enters the guest at the instruction after `call setjmp`, so each
+        # such return address becomes a function of its own (the containing function also keeps that code inline).
+        # Byte scan: the import thunks (jmp [slot]) have no .pdata, so a per-function sweep would not see them.
+        sj_slots = {a for a, n in pe.iat.items() if n.split("!")[-1] in ("__intrinsic_setjmp", "_setjmp", "setjmp")}
+        sj_targets = self.setjmp_thunks
+        for i in range(len(code) - 6):
+            if code[i] == 0xFF and code[i + 1] == 0x25:   # jmp qword ptr [rip+disp32]
+                if pe.text_lo + i + 6 + struct.unpack_from("<i", code, i + 2)[0] in sj_slots: sj_targets.add(pe.text_lo + i)
+        for i in range(len(code) - 5):
+            if code[i] == 0xE8:   # call rel32
+                t = pe.text_lo + i + 5 + struct.unpack_from("<i", code, i + 1)[0]
+                if t in sj_targets: starts.add(pe.text_lo + i + 5); self.setjmp_conts.add(pe.text_lo + i + 5)
+            elif code[i] == 0xFF and code[i + 1] == 0x15:   # call qword ptr [rip+disp32]
+                if pe.text_lo + i + 6 + struct.unpack_from("<i", code, i + 2)[0] in sj_slots: starts.add(pe.text_lo + i + 6); self.setjmp_conts.add(pe.text_lo + i + 6)
+        if self.setjmp_conts: print("setjmp continuations: %d" % len(self.setjmp_conts))
         for slot in pe.relocs:
             try: v = struct.unpack("<Q", pe.read(slot, 8))[0]
             except KeyError: continue
@@ -1272,6 +1381,20 @@ class Translator:
                 k2 = bisect.bisect_right(cov_lo, s)
                 cap = min(cov_lo[k2] if k2 < len(cov_lo) else pe.text_hi, pe.code_end(s))
                 self.regions[s] = [(s, min(nxt, cap))]
+        # a setjmp continuation is entered mid-function and branches anywhere in it (loops back to before itself):
+        # give it the whole range of the function that contains it
+        # (the continuation's own start must not cut the containing function's region short either)
+        conts = getattr(self, "setjmp_conts", set())
+        if conts:
+            prim = sorted(x for x in pe.pdata if x not in pe.chain_parent)
+            for cont in conts:
+                k = bisect.bisect_right(prim, cont) - 1
+                if k < 0: continue
+                s0 = prim[k]
+                if not (s0 < cont < pe.pdata[s0][0]): continue
+                full = [(s0, pe.pdata[s0][0])] + parts.get(s0, [])
+                self.regions[s0] = full
+                self.regions[cont] = list(full)
         self.funcs_set = fset
         print("functions: %d (pdata %d, extra %d)" % (len(self.funcs), len(pe.func_starts), len(self.funcs) - len(set(pe.func_starts) & fset)))
 
@@ -1335,6 +1458,11 @@ def write_module_tables(outdir, module, pe, allimp):
         f.write("static const uint64_t relocs[] = {\n%s  0\n};\n" % "".join("  0x%xull,\n" % r for r in rel))
         f.write('const GModule gmod_%s = { "%s", funcs, %d, imports, %d, sections, %d, 0x%xull, 0x%xull, 0x%xull, relocs, %d, %dll };\n'
                 % (m, module.lower(), len(TR.funcs_set), len(pe.iat), len(pe.sections), pe.base, pe.size, pe.entry, len(rel), pe.delta))
+        if pe.tls:   # static TLS: the runtime assigns the index and gives every thread a copy of the template
+            t = pe.tls
+            f.write("void rt_register_module_tls(const GModule *m, uint64_t start, uint64_t end, uint64_t index, uint32_t zero);\n")
+            f.write("__attribute__((constructor)) static void register_tls(void) { rt_register_module_tls(&gmod_%s, 0x%xull, 0x%xull, 0x%xull, %d); }\n"
+                    % (m, t["start"], t["end"], t["index"], t["zero"]))
         # exports called through another module's import table (I_<dll>_dll_<name>): load the DLL on first use, then run the code
         dll = module.lower() + ".dll"
         for name, addr in sorted(pe.exports.items()):
@@ -1386,6 +1514,10 @@ def main():
     allimp = sorted(set(pe.iat.values()))
     with open(os.path.join(outdir, "funcs.h"), "w") as f:
         f.write("#pragma once\n")
+        # setjmp sites: the host setjmp runs in the translated caller's frame; longjmp (runtime) restores the guest
+        # registers saved here and jumps back, and the site then returns its value in rax
+        f.write("#include <setjmp.h>\njmp_buf *rt_sj_prepare(CPU *c);\nvoid rt_sj_resumed(CPU *c);\n"
+                "#define rt_setjmp_site(c) do { if (setjmp(*rt_sj_prepare(c))) rt_sj_resumed(c); } while (0)\n")
         f.write("".join("void F_%x(CPU *c);\n" % a for a in sorted(TR.funcs_set)))
         f.write("".join("void I_%s(CPU *c);\n" % cname(n) for n in allimp))
     if module:
