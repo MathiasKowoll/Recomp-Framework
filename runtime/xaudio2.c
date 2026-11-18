@@ -51,6 +51,7 @@ typedef struct Voice {
     double pos; uint32_t loops_left;      // position in the current buffer (samples)
     uint64_t played;                      // samples played since creation
     uint64_t flushed[MAX_QUEUED]; int nflushed;   // contexts whose OnBufferEnd is still owed
+    float in_peak;                        // trace: loudest sample read from its buffers since the last report
     struct Voice *send[MAXSEND]; int nsend;   // outputs: submixes, NULL = the master
     float smat[MAXSEND][64]; uint32_t smat_src[MAXSEND], smat_dst[MAXSEND]; uint8_t smat_set[MAXSEND];   // per output
     struct { Xapo *x; uint64_t gx; int on; uint32_t out_ch; int locked, broken; uint8_t *fmt; } fx[MAXFX]; int nfx;
@@ -179,6 +180,7 @@ static int mix_voice(Voice *v, float *out, int n, Ev *ev, int maxev) {
         float t = (float)(v->pos - (double)f0);
         for (uint32_t c = 0; c < sc; c++) {
             float x = pcm(v, b->data, f0, c) * (1 - t) + pcm(v, b->data, f1, c) * t;
+            if (fabsf(x) > v->in_peak) v->in_peak = fabsf(x);
             out[(size_t)i * sc + c] += x * cv[c];
         }
         v->pos += step;
@@ -494,9 +496,10 @@ static void *audio_main(void *p) {
                   int shown = 0;
                   for (Voice *v = e->voices; v && shown < 12; v = v->next) if (v->kind == V_SOURCE && v->started && !v->dead) {
                       shown++;
-                      rt_log("[xaudio2]   voice %p fmt 0x%x %uch %uHz block %u mixable %d vol %.2f ratio %.2f sends %d effects %d queued %d played %llu\n",
-                             (void *)v, v->format, v->channels, v->rate, v->block_align, mixable(v), v->volume, v->ratio, v->nsend, v->nfx,
-                             v->nq, (unsigned long long)v->played);
+                      rt_log("[xaudio2]   voice %p fmt 0x%x %uch %uHz block %u mixable %d vol %.2f chvol %.2f/%.2f ratio %.2f sends %d (matrix %s) effects %d queued %d played %llu, input peak %.3f\n",
+                             (void *)v, v->format, v->channels, v->rate, v->block_align, mixable(v), v->volume, v->chan_vol[0], v->chan_vol[1], v->ratio,
+                             v->nsend, v->smat_set[0] ? "set" : "default", v->nfx, v->nq, (unsigned long long)v->played, v->in_peak);
+                      v->in_peak = 0;
                   }
                   pthread_mutex_unlock(&xmu);
                   peak = 0;
@@ -571,10 +574,18 @@ static void v_SetFilterParameters(CPU *c) { if (A1) memcpy(THIS_V->filter, PTR(A
 static void v_GetFilterParameters(CPU *c) { if (A1) memcpy(PTR(A1), THIS_V->filter, 12); }
 static void v_SetOutputFilterParameters(CPU *c) { RET(S_OK); }
 static void v_GetOutputFilterParameters(CPU *c) { if (A2) memcpy(PTR(A2), THIS_V->filter, 12); }
-static void v_SetVolume(CPU *c) { THIS_V->volume = AF(1); RET(S_OK); }
+static void v_SetVolume(CPU *c) {
+    if (fx_trace() && AF(1) != THIS_V->volume) { static int n; if (n++ < 100) rt_log("[xaudio2] SetVolume(voice %p, %.3f)\n", (void *)THIS_V, AF(1)); }
+    THIS_V->volume = AF(1); RET(S_OK);
+}
 static void v_GetVolume(CPU *c) { if (A1) wrf(A1, THIS_V->volume); }
 // SetChannelVolumes(this, channels, const float *volumes, op) / GetChannelVolumes(this, channels, float *volumes)
-static void v_SetChannelVolumes(CPU *c) { Voice *v = THIS_V; for (uint32_t i = 0; i < (uint32_t)A1 && i < 8; i++) v->chan_vol[i] = rdf(A2 + 4ull * i); RET(S_OK); }
+static void v_SetChannelVolumes(CPU *c) {
+    Voice *v = THIS_V;
+    for (uint32_t i = 0; i < (uint32_t)A1 && i < 8; i++) v->chan_vol[i] = rdf(A2 + 4ull * i);
+    if (fx_trace()) { static int n; if (n++ < 100) rt_log("[xaudio2] SetChannelVolumes(voice %p, %u ch: %.3f %.3f) after %.2f s\n", (void *)v, (uint32_t)A1, v->chan_vol[0], v->chan_vol[1], v->played / (double)OUT_RATE); }
+    RET(S_OK);
+}
 static void v_GetChannelVolumes(CPU *c) { Voice *v = THIS_V; for (uint32_t i = 0; i < (uint32_t)A1; i++) wrf(A2 + 4ull * i, i < 8 ? v->chan_vol[i] : 1); }
 // SetOutputMatrix(this, dest, srcCh, dstCh, const float *levels, op) / GetOutputMatrix(this, dest, srcCh, dstCh, float *levels)
 static void v_SetOutputMatrix(CPU *c) {
@@ -583,6 +594,9 @@ static void v_SetOutputMatrix(CPU *c) {
     pthread_mutex_lock(&xmu);
     int i = send_index(v, (Voice *)PTR(A1));
     if (i >= 0) { memcpy(v->smat[i], PTR(AN(4)), 4ull * sc * dc); v->smat_src[i] = sc; v->smat_dst[i] = dc; v->smat_set[i] = 1; }
+    if (fx_trace()) { static int n; if (n++ < 100) { const float *m = PTR(AN(4));
+        rt_log("[xaudio2] SetOutputMatrix(voice %p -> %p, %ux%u, output %d): %.3f %.3f %.3f %.3f\n", (void *)v, PTR(A1), sc, dc, i,
+               m[0], sc * dc > 1 ? m[1] : 0, sc * dc > 2 ? m[2] : 0, sc * dc > 3 ? m[3] : 0); } }
     pthread_mutex_unlock(&xmu);
     RET(i >= 0 ? S_OK : E_INVALIDARG);
 }
@@ -755,7 +769,10 @@ static void e_CreateMasteringVoice(CPU *c) {
 }
 static void e_StartEngine(CPU *c) { pthread_mutex_lock(&xmu); THIS_E->running = 1; pthread_mutex_unlock(&xmu); RET(S_OK); }
 static void e_StopEngine(CPU *c) { pthread_mutex_lock(&xmu); THIS_E->running = 0; pthread_mutex_unlock(&xmu); }
-static void e_CommitChanges(CPU *c) { RET(S_OK); }
+static void e_CommitChanges(CPU *c) {
+    if (fx_trace()) { static int n; if (n++ < 100) rt_log("[xaudio2] CommitChanges(%u)\n", (uint32_t)A1); }
+    RET(S_OK);
+}
 // XAUDIO2_PERFORMANCE_DATA (2.7, packed: 2 x UINT64 + 11 x UINT32 = 60 bytes): only the voice counts and latency are meaningful
 static void e_GetPerformanceData(CPU *c) {
     uint64_t p = A1; memset(PTR(p), 0, 60);
