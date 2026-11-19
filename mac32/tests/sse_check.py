@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Differential test of the mac32 translator's SSE and x87 conversions, one instruction at a time.
+"""Differential test of the mac32 translator's SSE, multiplies and x87 conversions, one instruction at a time.
 
 An i386 executable cannot run on an Apple Silicon Mac, under Rosetta or otherwise, so the instruction is not run
 as the translator sees it. Each line of TESTS is assembled twice from the same text:
   - for i386, and the bytes are translated by mac32/tools/recomp32.py and compiled for arm64;
   - for x86-64, where the same instruction on the same registers means the same thing, and run under Rosetta.
 Both get the same pseudo-random xmm0 (destination), xmm1 or memory (source) and eax, a quarter of the float lanes
-taken from a list of awkward values, and xmm0 and eax are compared afterwards.
+taken from a list of awkward values, and xmm0, eax and edx are compared afterwards, and for the multiplies the
+carry and overflow flags.
 
 What is not compared exactly:
   - NaNs: any NaN equals any NaN. x86 makes a negative default NaN and arm64 a positive one, and the two choose
@@ -26,7 +27,8 @@ import capstone as cs
 import lief
 import recomp32
 
-# instruction, how its result lanes are compared: i exact, f floats, d doubles, ~ floats to 1 part in 2048
+# instruction, how its result lanes are compared: i exact, f floats, d doubles, ~ floats to 1 part in 2048,
+# m exact and with the carry and overflow flags
 # xmm0 is the destination and xmm1 the source; MEM stands for the source in memory.
 TESTS = """
 pshufd xmm0, xmm1, 0x1b : i
@@ -163,6 +165,17 @@ cmpneqpd xmm0, xmm1 : i
 cmpnltpd xmm0, xmm1 : i
 cmpnlepd xmm0, xmm1 : i
 cmpordpd xmm0, xmm1 : i
+mul dl : m
+mul dx : m
+mul edx : m
+imul dl : m
+imul dx : m
+imul edx : m
+imul ax, dx : m
+imul ax, dx, 0x1234 : m
+imul ax, dx, -3 : m
+imul eax, edx : m
+imul eax, edx, -77 : m
 fld80 : x
 fstp80 : x
 """
@@ -171,7 +184,7 @@ DRIVER = r"""
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-typedef void (*test_fn)(uint8_t *a, uint8_t *s, uint32_t *eax);
+typedef void (*test_fn)(uint8_t *a, uint8_t *s, uint32_t *eax);   // eax[0] eax, eax[1] edx, eax[2] carry | overflow << 1
 extern const test_fn tests[]; extern const char kinds[]; extern const int ntests;
 static uint64_t st = 0x9E3779B97F4A7C15ull;
 static uint64_t rnd(void) { st ^= st << 13; st ^= st >> 7; st ^= st << 17; return st; }
@@ -190,7 +203,8 @@ int main(int argc, char **argv) {
     int trials = argc > 1 ? atoi(argv[1]) : 64;
     for (int t = 0; t < ntests; t++)
         for (int it = 0; it < trials; it++) {
-            _Alignas(16) uint8_t a[16], s[16]; uint32_t eax = (uint32_t)rnd();
+            _Alignas(16) uint8_t a[16], s[16]; uint32_t eax[3] = {(uint32_t)rnd(), (uint32_t)rnd(), 0};
+            if (kinds[t] == 'm' && (it & 3) == 1) { eax[0] = (int32_t)(int8_t)eax[0]; eax[1] = (int32_t)(int8_t)eax[1]; }   // small, of either sign
             fill(a, kinds[t], it); fill(s, kinds[t], it >> 2);
             if (kinds[t] == 'i' && (it & 4)) { uint64_t n = rnd() % 70; memcpy(s, &n, 8); }   // a shift count
             if (kinds[t] == 'x') {   // a ten-byte extended that is a number; and a double that is no NaN
@@ -202,10 +216,11 @@ int main(int argc, char **argv) {
                 if (d != d) d = 1.5; if (it % 7 == 0) d = D[it / 7 % 6]; if (it % 7 == 1) d = 1e-310;
                 memcpy(s, &d, 8);
             }
-            tests[t](a, s, &eax);
+            tests[t](a, s, eax);
+            if (kinds[t] != 'm') eax[2] = 0;
             printf("%d %d ", t, it);
             for (int k = 0; k < 16; k++) printf("%02x", a[k]);
-            printf(" %08x\n", eax);
+            printf(" %08x%08x%x\n", eax[0], eax[1], eax[2]);
         }
     return 0;
 }
@@ -245,7 +260,8 @@ def main():
         g = recomp32.FuncGen.__new__(recomp32.FuncGen)
         g.out, g.cur = [], i
         try:
-            if not g.sse(i.mnemonic, i.operands): raise recomp32.Unsupported(i.mnemonic)
+            if i.mnemonic in ("mul", "imul"): g.muldiv(i.mnemonic, i.operands)
+            elif not g.sse(i.mnemonic, i.operands): raise recomp32.Unsupported(i.mnemonic)
             bodies.append("\n".join(g.out))
         except Exception as ex:
             rejected.append("%s (%s)" % (t, ex)); bodies.append("    /* rejected */")
@@ -256,8 +272,9 @@ def main():
         for n, b in enumerate(bodies):
             # guest address 0x1000 is the source, for the tests that read it from memory through ecx
             f.write("static void t%d(uint8_t *a, uint8_t *s, uint32_t *eax) {\n    CPU cpu = {0}, *c = &cpu; M = s - 0x1000; C.ecx = 0x1000;\n"
-                    "    memcpy(&C.xmm[0], a, 16); memcpy(&C.xmm[1], s, 16); C.eax = *eax;\n%s\n"
-                    "    memcpy(a, &C.xmm[0], 16); *eax = C.eax;\n}\n" % (n, b))
+                    "    uint32_t cf = 0, zf = 0, sf = 0, of = 0, pf = 0;\n"
+                    "    memcpy(&C.xmm[0], a, 16); memcpy(&C.xmm[1], s, 16); C.eax = eax[0]; C.edx = eax[1];\n%s\n"
+                    "    memcpy(a, &C.xmm[0], 16); eax[0] = C.eax; eax[1] = C.edx; eax[2] = (cf != 0) | (of != 0) << 1;\n}\n" % (n, b))
         nx = len(bodies)
         f.write("static void t%d(uint8_t *a, uint8_t *s, uint32_t *eax) { M = a - 0x1000; double v = rdt(0x1000); memset(a, 0, 16); memcpy(a, &v, 8); }\n" % nx)
         f.write("static void t%d(uint8_t *a, uint8_t *s, uint32_t *eax) { double v; memcpy(&v, s, 8); M = a - 0x1000; memset(a, 0, 16); wrt(0x1000, v); }\n" % (nx + 1))
@@ -269,7 +286,9 @@ def main():
     with open(path("real.s"), "w") as f:
         f.write(".intel_syntax noprefix\n.text\n")
         for n, (t, _) in enumerate(sse):
-            f.write(".globl _r%d\n_r%d:\n movdqu xmm0, [rdi]\n movdqu xmm1, [rsi]\n mov eax, [rdx]\n %s\n movdqu [rdi], xmm0\n mov [rdx], eax\n ret\n"
+            f.write(".globl _r%d\n_r%d:\n mov r8, rdx\n movdqu xmm0, [rdi]\n movdqu xmm1, [rsi]\n mov eax, [r8]\n mov edx, [r8 + 4]\n %s\n"
+                    " setc r9b\n seto r10b\n movdqu [rdi], xmm0\n mov [r8], eax\n mov [r8 + 4], edx\n movzx r9d, r9b\n movzx r10d, r10b\n"
+                    " lea r9d, [r9 + r10*2]\n mov [r8 + 8], r9d\n ret\n"
                     % (n, n, t.replace("MEM8", "qword ptr [rsi]").replace("MEM", "xmmword ptr [rsi]")))
         f.write(".globl _r%d\n_r%d:\n fld tbyte ptr [rdi]\n pxor xmm0, xmm0\n movdqu [rdi], xmm0\n fstp qword ptr [rdi]\n ret\n" % (nx, nx))
         f.write(".globl _r%d\n_r%d:\n fld qword ptr [rsi]\n pxor xmm0, xmm0\n movdqu [rdi], xmm0\n fstp tbyte ptr [rdi]\n ret\n" % (nx + 1, nx + 1))
@@ -291,7 +310,7 @@ def main():
         ha, hb = bytes.fromhex(a.split()[2]), bytes.fromhex(b.split()[2])
         if a.split()[3] != b.split()[3]: return False
         fmt, n = ("<d", 8) if kind in ("d", "x") else ("<f", 4)
-        if kind == "i": return False
+        if kind in ("i", "m"): return False
         for k in range(0, 16, n):
             x, y = struct.unpack_from(fmt, ha, k)[0], struct.unpack_from(fmt, hb, k)[0]
             if ha[k:k + n] == hb[k:k + n] or (x != x and y != y): continue

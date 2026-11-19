@@ -13,6 +13,8 @@ extern const GPtr gptrs[];   extern const int ngptrs;
 extern const GSeg gsegs[];   extern const int ngsegs;
 extern const uint32_t gmodinit[]; extern const int ngmodinit;
 extern const GPtr gextrel[]; extern const int ngextrel;
+typedef struct { uint32_t addr; const char *name; int32_t addend; } GBind;   // LC_DYLD_INFO: slot = symbol + addend
+extern const GBind gbinds[]; extern const int ngbinds;
 
 void unimpl_import(CPU *c, const char *name);
 CPU *rt_init(const char *binpath);

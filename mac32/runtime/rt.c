@@ -380,6 +380,13 @@ CPU *rt_init(const char *binpath) {
     for (int i = 0; i < ngptrs; i++) wr32(gptrs[i].addr, rt_import_addr(gptrs[i].name));
     // External relocations: slot += address of symbol (addend is stored in the slot).
     for (int i = 0; i < ngextrel; i++) wr32(gextrel[i].addr, rd32(gextrel[i].addr) + rt_import_addr(gextrel[i].name));
+    // LC_DYLD_INFO binds: slot = address of symbol + addend. The same few names fill thousands of slots (type_info
+    // vtables, the pure-virtual handler), so the last one is remembered.
+    const char *last = NULL; uint32_t last_addr = 0;
+    for (int i = 0; i < ngbinds; i++) {
+        if (gbinds[i].name != last && (!last || strcmp(gbinds[i].name, last))) { last = gbinds[i].name; last_addr = rt_import_addr(last); }
+        wr32(gbinds[i].addr, last_addr + (uint32_t)gbinds[i].addend);
+    }
     struct sigaction sa; memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = crash_handler; sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigaction(SIGSEGV, &sa, NULL); sigaction(SIGBUS, &sa, NULL); sigaction(SIGILL, &sa, NULL); sigaction(SIGFPE, &sa, NULL);
@@ -389,7 +396,7 @@ CPU *rt_init(const char *binpath) {
 }
 
 // ---- import name -> guest address ----
-#define NIMPDATA 512
+#define NIMPDATA 4096
 static struct { const char *name; uint32_t addr; } impdata[NIMPDATA];
 static int nimpdata;
 uint32_t rt_import_addr(const char *name) {
@@ -426,4 +433,5 @@ uint32_t rt_import_addr(const char *name) {
 // data-import slots are filled by the shim layer
 void rt_set_data_import(const char *name, uint32_t guest_addr) {
     for (int i = 0; i < ngptrs; i++) if (!strcmp(gptrs[i].name, name)) wr32(gptrs[i].addr, guest_addr);
+    for (int i = 0; i < ngbinds; i++) if (!strcmp(gbinds[i].name, name)) wr32(gbinds[i].addr, guest_addr + (uint32_t)gbinds[i].addend);
 }

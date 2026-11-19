@@ -438,11 +438,23 @@ class FuncGen:
             d = ops[0]
             a = self.rd(ops[1]) if len(ops) == 3 else self.rd(d)
             b = self.rd(ops[2], d.size) if len(ops) == 3 else self.rd(ops[1], d.size)
-            if d.size != 4: raise Unsupported("imul16")
+            if d.size == 2:
+                e("{ int32_t p = (int32_t)(int16_t)%s * (int32_t)(int16_t)%s; uint16_t r = (uint16_t)p; "
+                  "cf = of = p != (int32_t)(int16_t)r; %s %s }" % (a, b, self.szf("r", 2), self.wr(d, "r")))
+                return
+            if d.size != 4: raise Unsupported("imul%d" % (8 * d.size))
             e("{ int64_t p = (int64_t)(int32_t)%s * (int64_t)(int32_t)%s; uint32_t r = (uint32_t)p; "
               "cf = of = p != (int64_t)(int32_t)r; %s %s }" % (a, b, self.szf("r", 4), self.wr(d, "r")))
             return
         s = ops[0]
+        if s.size != 4 and m in ("mul", "imul"):   # al * r/m8 -> ax ; ax * r/m16 -> dx:ax
+            v, n = self.rd(s), 8 * s.size
+            ty = ("int%d_t" if m == "imul" else "uint%d_t") % n
+            lo = "C.eax = (C.eax & 0xFFFF0000u) | (uint16_t)p;" if n == 8 else \
+                 "C.eax = (C.eax & 0xFFFF0000u) | (uint16_t)p; C.edx = (C.edx & 0xFFFF0000u) | (uint16_t)((uint32_t)p >> 16);"
+            over = "p != (int32_t)(%s)p" % ty if m == "imul" else "((uint32_t)p >> %d) != 0" % n
+            e("{ int32_t p = (int32_t)(%s)C.eax * (int32_t)(%s)%s; %s cf = of = %s; }" % (ty, ty, v, lo, over))
+            return
         if s.size != 4: raise Unsupported(m + "8/16")
         v = self.rd(s)
         if m == "mul":
@@ -929,7 +941,7 @@ class Translator:
             f.write("};\nconst int ngfuncs = %d;\n" % len(funcs))
             # every stub gets a shim symbol (weak default = unimplemented)
             allimp = sorted({n for n in self.img.stubs.values() if n} | {n for n in self.img.ptrs.values() if n}
-                            | {n for _, n in self.img.extrel})
+                            | {n for _, n in self.img.extrel} | {n for _, n, _ in self.img.binds})
             for n in allimp:
                 f.write('__attribute__((weak)) void I_%s(CPU *c) { unimpl_import(c, "%s"); }\n' % (cname(n), n))
             for a, n in sorted(self.hle.items()):
@@ -955,6 +967,9 @@ class Translator:
             f.write("const GPtr gextrel[] = {\n")
             f.write("".join('  {0x%x, "%s"},\n' % (a, n) for a, n in self.img.extrel))
             f.write("};\nconst int ngextrel = %d;\n" % len(self.img.extrel))
+            f.write("const GBind gbinds[] = {\n")
+            f.write("".join('  {0x%x, "%s", %d},\n' % b for b in self.img.binds))
+            f.write("};\nconst int ngbinds = %d;\n" % len(self.img.binds))
             f.write("const GSeg gsegs[] = {\n")
             f.write("".join('  {"%s", 0x%x, 0x%x, 0x%x, 0x%x},\n' % s for s in self.img.segments))
             f.write("};\nconst int ngsegs = %d;\n" % len(self.img.segments))

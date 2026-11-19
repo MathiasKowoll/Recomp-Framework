@@ -43,6 +43,12 @@ class Image:
             for k in range(s.size // 4):
                 self.ptrs[s.virtual_address + 4 * k] = name_of(s.reserved1 + k)
 
+        # LC_DYLD_INFO binds (executables linked for 10.6 and later have these and no classic relocations): pointer
+        # slots anywhere in the data that dyld fills with symbol address + addend. The slots of the two pointer
+        # sections are in self.ptrs already; the rest are C++ vtable and type_info pointers, constant CFStrings
+        # and function pointers in tables.
+        self.binds = [(a, n, add) for a, n, add in self.dyld_binds() if a not in self.ptrs]
+
         # functions: every text symbol in __text
         lo, hi = self.text.virtual_address, self.text.virtual_address + self.text.size
         import subprocess
@@ -76,6 +82,59 @@ class Image:
         self.func_names = fn
         self.name_to_addr = {v: k for k, v in fn.items()}
         self.text_end = hi
+
+    def dyld_binds(self):
+        """(address, symbol, addend) of every non-lazy bind in LC_DYLD_INFO's opcode stream."""
+        import struct
+        raw, segs, bind = self.raw, [], None
+        ncmds = struct.unpack_from("<I", raw, 16)[0]
+        o = 28
+        for _ in range(ncmds):
+            cmd, size = struct.unpack_from("<II", raw, o)
+            if cmd == 1: segs.append(struct.unpack_from("<I", raw, o + 24)[0])          # LC_SEGMENT: vmaddr
+            if cmd & 0x7FFFFFFF == 0x22: bind = struct.unpack_from("<II", raw, o + 16)  # bind_off, bind_size
+            o += size
+        if not bind or not bind[1]: return []
+        p, end = bind[0], bind[0] + bind[1]
+        def uleb():
+            nonlocal p
+            v = shift = 0
+            while True:
+                c = raw[p]; p += 1
+                v |= (c & 0x7F) << shift; shift += 7
+                if not c & 0x80: return v
+        def sleb():
+            nonlocal p
+            v = shift = 0
+            while True:
+                c = raw[p]; p += 1
+                v |= (c & 0x7F) << shift; shift += 7
+                if not c & 0x80: return v - (1 << shift) if c & 0x40 else v
+        out, addr, name, addend, kind = [], 0, None, 0, 1
+        def do():
+            nonlocal addr
+            if kind == 1 and name: out.append((addr & 0xFFFFFFFF, name, addend))
+            addr += 4
+        while p < end:
+            op, imm = raw[p] & 0xF0, raw[p] & 0x0F
+            p += 1
+            if op == 0x00: continue                       # DONE: also the padding at the end
+            elif op == 0x10 or op == 0x30: pass           # dylib ordinal: names are looked up flat
+            elif op == 0x20: uleb()
+            elif op == 0x40:
+                e = raw.index(b"\0", p); name = raw[p:e].decode(); p = e + 1
+            elif op == 0x50: kind = imm
+            elif op == 0x60: addend = sleb()
+            elif op == 0x70: addr = segs[imm] + uleb()
+            elif op == 0x80: addr += uleb()
+            elif op == 0x90: do()
+            elif op == 0xA0: do(); addr += uleb()
+            elif op == 0xB0: do(); addr += imm * 4
+            elif op == 0xC0:
+                count, skip = uleb(), uleb()
+                for _ in range(count): do(); addr += skip
+            else: raise ValueError("bind opcode 0x%x" % (op | imm))
+        return out
 
     def read(self, addr, n):
         for name, va, vs, fo, fs in self.segments:
