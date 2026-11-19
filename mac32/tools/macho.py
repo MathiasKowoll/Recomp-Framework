@@ -1,4 +1,4 @@
-"""Load the original i386 Mach-O: sections, function symbols, import stubs."""
+"""Load the original i386 Mach-O: sections, functions (symbols and LC_FUNCTION_STARTS), import stubs."""
 import bisect
 import lief
 
@@ -55,6 +55,24 @@ class Image:
                 v = int(p[0], 16)
                 if lo <= v < hi and v not in fn:
                     fn[v] = p[2]
+        # ...and every entry of LC_FUNCTION_STARTS, which the linker writes whether or not the symbols were kept:
+        # a stripped executable has few of the former and all of the latter. The table is a list of ULEB128
+        # distances, the first from the start of __TEXT and each of the rest from the entry before it.
+        nsym = len(fn)
+        fs = b.function_starts if b.has_function_starts else None
+        if fs:
+            a, p, end = self.text.segment.virtual_address, fs.data_offset, fs.data_offset + fs.data_size
+            while p < end:
+                d = shift = 0
+                while True:
+                    c = self.raw[p]; p += 1
+                    d |= (c & 0x7F) << shift; shift += 7
+                    if not c & 0x80: break
+                if not d: break
+                a += d
+                if lo <= a < hi and a not in fn:
+                    fn[a] = "sub_%x" % a
+        self.func_from_symbols, self.func_from_starts = nsym, len(fn) - nsym
         self.func_addrs = sorted(fn)
         self.func_names = fn
         self.name_to_addr = {v: k for k, v in fn.items()}

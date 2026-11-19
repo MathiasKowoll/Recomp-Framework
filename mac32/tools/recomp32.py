@@ -746,7 +746,8 @@ class Translator:
             f.write("const GSeg gsegs[] = {\n")
             f.write("".join('  {"%s", 0x%x, 0x%x, 0x%x, 0x%x},\n' % s for s in self.img.segments))
             f.write("};\nconst int ngsegs = %d;\n" % len(self.img.segments))
-        print("functions: %d  imports used: %d" % (len(funcs), len(self.imports)))
+        print("functions: %d (%d from symbols, %d more from LC_FUNCTION_STARTS)  imports used: %d"
+              % (len(funcs), self.img.func_from_symbols, self.img.func_from_starts, len(self.imports)))
         if self.unsupported:
             print("UNSUPPORTED:", self.unsupported)
 
