@@ -138,41 +138,59 @@ class FuncGen:
     PC_THUNK = {0x04, 0x0c, 0x14, 0x1c, 0x2c, 0x34, 0x3c}   # mov reg, [esp] ; ret (___i686.get_pc_thunk.*)
 
     def relative_tables(self, seen, pic):
-        """Switches of position-independent code: mov r, [b + i*4 + d] ; add r, b ; jmp r, where b holds the
-        function's PIC base (the address after its `call next`) and each entry is a case's distance from that
-        base. Returns the cases of the tables not seen before."""
+        """Switches of position-independent code. Each entry of the table is a case's distance from the function's
+        PIC base (the address after its `call next`), which a register holds, or a stack slot once the function
+        has run out of registers. The shapes the compilers of the time wrote:
+            mov r, [b + i*4 + d] ; add r, b ; jmp r          the base in a register
+            mov r, [b + i*4 + d] ; add r, [ebp - n] ; jmp r   the base spilled
+            add b, [b + i*4 + d] ; jmp b                      load and add in one
+            mov r, [t + i*4]     ; add r, b ; jmp r          the table's address computed earlier (lea t, [b + d])
+        with instructions that set other registers in between. Returns the cases of the tables not seen before."""
         if len(pic) != 1: return []
         base, found = next(iter(pic)), []
-        for i in [x for x in seen.values() if x]:
-            if i.address in self.tables or i.mnemonic != "jmp" or i.operands[0].type != X.X86_OP_REG: continue
-            r = i.operands[0].reg
-            prev = sorted((x for x in seen.values() if x and i.address - 64 <= x.address < i.address), key=lambda x: x.address)
-            add = load = None
-            for p in reversed(prev[-4:]):
-                o = p.operands
-                if len(o) != 2 or o[0].type != X.X86_OP_REG or o[0].reg != r: continue
-                if add is None:
-                    if p.mnemonic == "add" and o[1].type == X.X86_OP_REG: add = p
-                    else: break
-                elif p.mnemonic == "mov" and o[1].type == X.X86_OP_MEM and o[1].mem.base == add.operands[1].reg \
-                        and o[1].mem.index and o[1].mem.scale == 4:
-                    load = p; break
-                else: break
-            if not load: continue
-            m = load.operands[1].mem
-            limit = None
-            for p in reversed(prev):
-                if p.address >= load.address: continue
-                o = p.operands
-                if p.mnemonic == "cmp" and len(o) == 2 and o[0].type == X.X86_OP_REG and o[0].reg == m.index \
-                        and o[1].type == X.X86_OP_IMM:
-                    limit = o[1].imm + 1; break
-            tbl, ta = [], (base + m.disp) & 0xFFFFFFFF
+        def entries(ta, limit=None):
+            tbl = []
             while len(tbl) < (limit or 4096):
                 try: t = (base + int.from_bytes(self.img.read(ta, 4), "little")) & 0xFFFFFFFF
                 except KeyError: break
                 if not (self.addr <= t < self.end): break
                 tbl.append(t); ta += 4
+            return tbl
+        for i in [x for x in seen.values() if x]:
+            if i.address in self.tables or i.mnemonic != "jmp" or i.operands[0].type != X.X86_OP_REG: continue
+            r = i.operands[0].reg
+            prev = sorted((x for x in seen.values() if x and i.address - 96 <= x.address < i.address), key=lambda x: x.address)
+            add = load = None
+            for p in reversed(prev[-14:]):
+                o = p.operands
+                if len(o) != 2 or o[0].type != X.X86_OP_REG or o[0].reg != r: continue
+                indexed = o[1].type == X.X86_OP_MEM and o[1].mem.index and o[1].mem.scale == 4
+                if add is None:
+                    if p.mnemonic == "add" and indexed and o[1].mem.base == r: load = p; break
+                    if p.mnemonic == "add" and (o[1].type == X.X86_OP_REG or (o[1].type == X.X86_OP_MEM and not o[1].mem.index)):
+                        add = p
+                    else: break
+                elif p.mnemonic == "mov" and indexed and o[1].mem.base:
+                    load = p; break
+                else: break
+            if not load: continue
+            m = load.operands[1].mem
+            if m.disp:
+                # As many entries as lead into this function. The compare that guards the index is not looked for:
+                # it may be on another register or a screen away, and a compare taken for it by mistake cuts real
+                # cases off, while a case too many (the start of the table after this one) costs nothing.
+                tbl = entries((base + m.disp) & 0xFFFFFFFF)
+            else:
+                # The table's address was computed apart: every `lea reg, [reg + d]` of the function whose base + d
+                # holds distances to this function is taken for one. More cases than this jump has is harmless.
+                tbl = []
+                for q in [x for x in seen.values() if x]:
+                    o = q.operands
+                    if q.mnemonic == "lea" and len(o) == 2 and o[1].type == X.X86_OP_MEM and o[1].mem.base \
+                            and not o[1].mem.index and o[1].mem.disp:
+                        e = entries((base + o[1].mem.disp) & 0xFFFFFFFF)
+                        if len(e) >= 2: tbl += e
+                if not tbl: continue
             self.tables[i.address] = (tbl, None)
             found.extend(tbl)
         return found
