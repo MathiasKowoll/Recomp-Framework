@@ -12,7 +12,9 @@ _Thread_local CPU *rt_cur;
 // ---- RT32_MEMWATCH: catch guest writes to an address range (debug) ----
 static uint32_t mw_addr, mw_len = 8, mw_armed, mw_hits;
 static uint8_t *mw_page; static size_t mw_pagesz;
-uint8_t rt_watch[0x500000 / 8];
+// One bit for every guest address a function can start at: the image lies below the heap (HEAP_BASE). Sized for
+// 5 MB of code it was read past its end by a larger game, and a function entry then looked watched at random.
+uint8_t rt_watch[0x10000000 / 8];
 static void mw_protect(int on) { mprotect(mw_page, mw_pagesz, on ? PROT_READ : PROT_READ | PROT_WRITE); }
 static int mw_reprotect_pending;
 void rt_memwatch_tick(void) { if (mw_reprotect_pending) { mw_reprotect_pending = 0; mw_protect(1); } }

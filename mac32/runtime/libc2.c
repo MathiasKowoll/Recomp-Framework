@@ -334,3 +334,15 @@ NONET(send_UNIX2003) NONET(sendto_UNIX2003) NONET(recv_UNIX2003) NONET(recvfrom_
 NONET(getsockopt) NONET(shutdown) NONET(getpeername_UNIX2003) NONET(getsockname_UNIX2003)
 NONET(select_UNIX2003) NONET(select_DARWIN_EXTSN)
 void I__gethostbyname(CPU *c) { RET(0); }
+
+// ---- memory mapping, for a program with its own allocator ----
+// mmap hands out a block of the guest heap (above). An allocator asks for more than it wants and gives back the
+// head and the tail to get an aligned piece, so munmap of part of a block cannot free it: nothing is returned.
+void I__munmap(CPU *c) { RET(0); }
+void I__munmap_UNIX2003(CPU *c) { RET(0); }
+void I__mprotect(CPU *c) { RET(0); }
+void I__mprotect_UNIX2003(CPU *c) { RET(0); }
+void I__getpagesize(CPU *c) { RET(4096); }            // the guest's page, not the host's 16 KB
+void I__sbrk(CPU *c) { errno = ENOMEM; seterr(); RET(-1); }   // no break to move: allocators fall back to mmap
+void I__pread(CPU *c) { MC(ARG(1), ARG(2)); RET(pread((int)ARG(0), S(ARG(1)), ARG(2), (off_t)(int64_t)ARG64(3))); }
+void I__pwrite(CPU *c) { RET(pwrite((int)ARG(0), S(ARG(1)), ARG(2), (off_t)(int64_t)ARG64(3))); }

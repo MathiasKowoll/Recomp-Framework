@@ -43,27 +43,31 @@ class Image:
             for k in range(s.size // 4):
                 self.ptrs[s.virtual_address + 4 * k] = name_of(s.reserved1 + k)
 
+        # A stub or a pointer slot may name a symbol the image defines itself: C++ functions and variables that
+        # every image may carry a copy of (inline functions, templates, guard variables) are reached through them
+        # so that dyld can pick one copy. Here there is one image, so the copy is its own: such a stub is the
+        # function, and such a slot keeps what the file holds, which is the definition's address.
+        import subprocess
+        defined = {}
+        for line in subprocess.run(["nm", "-n", path], capture_output=True, text=True, env={"LC_ALL": "C"}).stdout.splitlines():
+            p = line.split(" ", 2)
+            if len(p) == 3 and p[1] not in "Uu": defined.setdefault(p[2], int(p[0], 16))
+        self.stub_alias = {a: defined[n] for a, n in self.stubs.items() if n in defined}
+        for a in self.stub_alias: del self.stubs[a]
+        for a, n in self.ptrs.items():
+            if n in defined: self.ptrs[a] = None
+
         # LC_DYLD_INFO binds (executables linked for 10.6 and later have these and no classic relocations): pointer
         # slots anywhere in the data that dyld fills with symbol address + addend. The slots of the two pointer
         # sections are in self.ptrs already; the rest are C++ vtable and type_info pointers, constant CFStrings
         # and function pointers in tables.
         self.binds = [(a, n, add) for a, n, add in self.dyld_binds() if a not in self.ptrs]
 
-        # functions: every text symbol in __text
+        # Functions: the entries of LC_FUNCTION_STARTS, which the linker writes whether or not the symbols were
+        # kept (a stripped executable has few symbols and all of these), and every text symbol. The table is a list
+        # of ULEB128 distances, the first from the start of __TEXT and each of the rest from the entry before it.
         lo, hi = self.text.virtual_address, self.text.virtual_address + self.text.size
-        import subprocess
-        fn = {}
-        out = subprocess.run(["nm", "-n", path], capture_output=True, text=True,
-                             env={"LC_ALL": "C"}).stdout
-        for line in out.splitlines():
-            p = line.split(" ", 2)
-            if len(p) == 3 and p[1] in ("T", "t"):
-                v = int(p[0], 16)
-                if lo <= v < hi and v not in fn:
-                    fn[v] = p[2]
-        # ...and every entry of LC_FUNCTION_STARTS, which the linker writes whether or not the symbols were kept:
-        # a stripped executable has few of the former and all of the latter. The table is a list of ULEB128
-        # distances, the first from the start of __TEXT and each of the rest from the entry before it.
+        starts = []
         fs = b.function_starts if b.has_function_starts else None
         if fs:
             a, p, end = self.text.segment.virtual_address, fs.data_offset, fs.data_offset + fs.data_size
@@ -75,8 +79,29 @@ class Image:
                     if not c & 0x80: break
                 if not d: break
                 a += d
-                if lo <= a < hi and a not in fn:
-                    fn[a] = "sub_%x" % a
+                starts.append(a)
+        # Code is __text. A program may keep functions in a section of its own too (tcmalloc's entry points are in
+        # one called google_malloc, with no instruction flags, no symbols and no entries in LC_FUNCTION_STARTS):
+        # the translator finds those as the targets of calls and adds them with add_function().
+        self.code = [(lo, hi)]
+        self.other_text = sorted((x.virtual_address, x.virtual_address + x.size) for x in b.sections
+                                 if x.segment.name == "__TEXT" and x.size and str(x.type).endswith("REGULAR")
+                                 and x.name not in ("__text", "__stub_helper", "__const", "__gcc_except_tab",
+                                                    "__unwind_info", "__eh_frame", "__ustring"))
+        def code(a): return any(l <= a < h for l, h in self.code)
+        import subprocess
+        fn = {}
+        out = subprocess.run(["nm", "-n", path], capture_output=True, text=True,
+                             env={"LC_ALL": "C"}).stdout
+        for line in out.splitlines():
+            p = line.split(" ", 2)
+            if len(p) == 3 and p[1] in ("T", "t", "S", "s"):
+                v = int(p[0], 16)
+                if code(v) and v not in fn and (p[1] in "Tt" or not lo <= v < hi):
+                    fn[v] = p[2]
+        for a in starts:
+            if code(a) and a not in fn:
+                fn[a] = "sub_%x" % a
         self.func_unnamed = {a for a, n in fn.items() if n == "sub_%x" % a}
         self.func_addrs = sorted(fn)
         self.func_names = fn
@@ -145,9 +170,22 @@ class Image:
                 return self.raw[fo + o: fo + o + n]
         raise KeyError(hex(addr))
 
+    def add_function(self, addr):
+        """A function found by the translator in a section of __TEXT other than __text. False if it is not one."""
+        if addr in self.func_names: return False
+        sec = next(((l, h) for l, h in self.other_text if l <= addr < h), None)
+        if not sec: return False
+        if sec not in self.code: self.code.append(sec)
+        bisect.insort(self.func_addrs, addr)
+        self.func_names[addr] = "sub_%x" % addr
+        self.func_unnamed.add(addr)
+        return True
+
     def func_end(self, addr):
         i = bisect.bisect_right(self.func_addrs, addr)
-        return self.func_addrs[i] if i < len(self.func_addrs) else self.text_end
+        ends = [h for l, h in self.code if l <= addr < h]   # the last function of a section ends with it
+        if i < len(self.func_addrs): ends.append(self.func_addrs[i])
+        return min(ends) if ends else self.text_end
 
     def func_containing(self, addr):
         i = bisect.bisect_right(self.func_addrs, addr) - 1

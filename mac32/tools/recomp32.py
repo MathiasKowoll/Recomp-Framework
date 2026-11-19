@@ -32,6 +32,25 @@ class Unsupported(Exception):
     pass
 
 
+class rewrite:
+    """Write a file only if what it would hold differs from what it holds: a translation after a small change
+    leaves most of its output as it was, and make then compiles only the rest."""
+    def __init__(self, path): self.path = path
+    def __enter__(self):
+        import io
+        self.f = io.StringIO()
+        return self.f
+    def __exit__(self, kind, *rest):
+        if kind: return False
+        new = self.f.getvalue()
+        try:
+            with open(self.path) as f: same = f.read() == new
+        except OSError: same = False
+        if not same:
+            with open(self.path, "w") as f: f.write(new)
+        return False
+
+
 class FuncGen:
     def __init__(self, tr, addr):
         self.tr, self.img, self.addr = tr, tr.img, addr
@@ -264,6 +283,7 @@ class FuncGen:
         return self.tail(t, frm)
 
     def tail(self, t, frm):
+        t = self.img.stub_alias.get(t, t)
         if t in self.tr.hle:
             return "%s(c); C.esp += 4; return;" % self.tr.hle_name(t)
         if self.tr.lo <= t < self.tr.hi and t in self.img.func_names:
@@ -470,6 +490,7 @@ class FuncGen:
         e = self.e
         if op.type == X.X86_OP_IMM:
             t = op.imm
+            t = self.img.stub_alias.get(t, t)
             if t in self.img.stubs:
                 name = self.img.stubs[t]
                 if name == "_setjmp":
@@ -915,26 +936,57 @@ class Translator:
     def hle_name(self, t):
         return "H_" + cname(self.hle[t])
 
+    def discover(self):
+        """Functions outside __text: the targets of direct calls and jumps that land in another section of __TEXT,
+        and then whatever those call there. Returns how many were added."""
+        img = self.img
+        if not img.other_text: return 0
+        lo, hi = img.other_text[0][0], img.other_text[-1][1]
+        lite = cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_32)
+        work = []
+        for a in list(img.func_addrs):
+            end = img.func_end(a)
+            code = img.read(a, end - a)
+            p = a
+            while p < end:   # a plain sweep: whatever does not decode is stepped over
+                n = 0
+                for address, size, mnemonic, op_str in lite.disasm_lite(code[p - a:], p):
+                    n = address + size
+                    if mnemonic in ("call", "jmp") and op_str.startswith("0x"):
+                        t = int(op_str, 16)
+                        if lo <= t < hi and img.add_function(t): work.append(t)   # from __text: a call or a tail call
+                p = max(n, p + 1)
+        added = len(work)
+        while work:
+            g = FuncGen(self, work.pop())
+            for i in g.ins:   # inside the section a jump is a branch, and `call next` is how the code finds itself
+                if i.mnemonic == "call" and i.operands and i.operands[0].type == X.X86_OP_IMM:
+                    t = i.operands[0].imm
+                    if t != i.address + i.size and lo <= t < hi and img.add_function(t): work.append(t); added += 1
+        return added
+
     def imp(self, name):
         self.imports.add(name)
         return "I_" + cname(name)
 
     def run(self, outdir, per_file=200):
+        outside = self.discover()
         funcs = [a for a in self.img.func_addrs if self.lo <= a < self.hi]
         os.makedirs(outdir, exist_ok=True)
-        for fn in os.listdir(outdir):
-            if fn.startswith("code_") and fn.endswith(".c"): os.remove(os.path.join(outdir, fn))
         bodies = [FuncGen(self, a).gen() for a in funcs]
         hdr = '#include "rt.h"\n#include "funcs.h"\n#pragma clang diagnostic ignored "-Wunused-label"\n'
         for k in range(0, len(bodies), per_file):
-            with open(os.path.join(outdir, "code_%03d.c" % (k // per_file)), "w") as f:
+            with rewrite(os.path.join(outdir, "code_%03d.c" % (k // per_file))) as f:
                 f.write(hdr + "\n\n".join(bodies[k:k + per_file]) + "\n")
-        with open(os.path.join(outdir, "funcs.h"), "w") as f:
+        for fn in os.listdir(outdir):   # files of a longer translation before this one
+            m = re.match(r"code_(\d+)\.c$", fn)
+            if m and int(m.group(1)) * per_file >= len(bodies): os.remove(os.path.join(outdir, fn))
+        with rewrite(os.path.join(outdir, "funcs.h")) as f:
             f.write("#pragma once\n")
             f.write("".join("void F_%x(CPU *c);\n" % a for a in funcs))
             f.write("".join("void I_%s(CPU *c);\n" % cname(n) for n in sorted(self.imports)))
             f.write("".join("void H_%s(CPU *c);\n" % cname(n) for n in sorted(self.hle.values())))
-        with open(os.path.join(outdir, "tables.c"), "w") as f:
+        with rewrite(os.path.join(outdir, "tables.c")) as f:
             f.write('#include "rt.h"\n#include "tables.h"\n#include "funcs.h"\n')
             f.write("const GFunc gfuncs[] = {\n")
             f.write("".join('  {0x%x, F_%x, "%s"},\n' % (a, a, self.img.func_names[a]) for a in funcs))
@@ -973,9 +1025,9 @@ class Translator:
             f.write("const GSeg gsegs[] = {\n")
             f.write("".join('  {"%s", 0x%x, 0x%x, 0x%x, 0x%x},\n' % s for s in self.img.segments))
             f.write("};\nconst int ngsegs = %d;\n" % len(self.img.segments))
-        print("functions: %d (%d from symbols, %d more from LC_FUNCTION_STARTS)  imports used: %d"
-              % (len(funcs), sum(a not in self.img.func_unnamed for a in funcs),
-                 sum(a in self.img.func_unnamed for a in funcs), len(self.imports)))
+        print("functions: %d (%d from symbols, %d more from LC_FUNCTION_STARTS and from calls, %d of them outside __text)"
+              "  imports used: %d" % (len(funcs), sum(a not in self.img.func_unnamed for a in funcs),
+                                      sum(a in self.img.func_unnamed for a in funcs), outside, len(self.imports)))
         if self.unsupported:
             print("UNSUPPORTED:", self.unsupported)
 

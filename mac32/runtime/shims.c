@@ -10,6 +10,7 @@
 #include <locale.h>
 #include <time.h>
 #include <runetype.h>
+#include <sched.h>
 
 void rt_set_data_import(const char *name, uint32_t guest_addr);
 
@@ -277,3 +278,64 @@ int gformat_ext(char *out, size_t cap, const char *fmt, uint32_t va) { return gf
 uint32_t gfile_wrap(FILE *f) { return gfile_new(f); }
 FILE *gfile_host(uint32_t g) { return HF(g); }
 uint32_t g_errno_addr(void) { return g_errno; }
+
+// ---- libkern/OSAtomic.h ----
+// On the guest's own memory, with the host's atomics. The compare-and-swaps return whether they swapped; a stub
+// that always says no turns every retry loop into a spin.
+#define GP32(a) ((uint32_t *)(M + (uint32_t)(a)))
+static void cas32(CPU *c) {   // (old, new, *value)
+    uint32_t old = ARG(0);
+    RET(__atomic_compare_exchange_n(GP32(ARG(2)), &old, ARG(1), 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) ? 1 : 0);
+}
+void I__OSAtomicCompareAndSwap32(CPU *c) { cas32(c); }
+void I__OSAtomicCompareAndSwap32Barrier(CPU *c) { cas32(c); }
+void I__OSAtomicCompareAndSwapInt(CPU *c) { cas32(c); }
+void I__OSAtomicCompareAndSwapIntBarrier(CPU *c) { cas32(c); }
+void I__OSAtomicCompareAndSwapLong(CPU *c) { cas32(c); }
+void I__OSAtomicCompareAndSwapLongBarrier(CPU *c) { cas32(c); }
+void I__OSAtomicCompareAndSwapPtr(CPU *c) { cas32(c); }
+void I__OSAtomicCompareAndSwapPtrBarrier(CPU *c) { cas32(c); }
+static void add32(CPU *c) { RET(__atomic_add_fetch(GP32(ARG(1)), ARG(0), __ATOMIC_SEQ_CST)); }   // (amount, *value) -> new value
+void I__OSAtomicAdd32(CPU *c) { add32(c); }
+void I__OSAtomicAdd32Barrier(CPU *c) { add32(c); }
+static void add64(CPU *c) {   // (amount: two slots, *value) -> new value in edx:eax
+    uint64_t amount = ARG(0) | (uint64_t)ARG(1) << 32;
+    uint64_t v = __atomic_add_fetch((uint64_t *)(M + ARG(2)), amount, __ATOMIC_SEQ_CST);
+    c->eax = (uint32_t)v; c->edx = (uint32_t)(v >> 32);
+}
+void I__OSAtomicAdd64(CPU *c) { add64(c); }
+void I__OSAtomicAdd64Barrier(CPU *c) { add64(c); }
+void I__OSAtomicIncrement32(CPU *c) { RET(__atomic_add_fetch(GP32(ARG(0)), 1, __ATOMIC_SEQ_CST)); }
+void I__OSAtomicIncrement32Barrier(CPU *c) { RET(__atomic_add_fetch(GP32(ARG(0)), 1, __ATOMIC_SEQ_CST)); }
+void I__OSAtomicDecrement32(CPU *c) { RET(__atomic_sub_fetch(GP32(ARG(0)), 1, __ATOMIC_SEQ_CST)); }
+void I__OSAtomicDecrement32Barrier(CPU *c) { RET(__atomic_sub_fetch(GP32(ARG(0)), 1, __ATOMIC_SEQ_CST)); }
+void I__OSMemoryBarrier(CPU *c) { __atomic_thread_fence(__ATOMIC_SEQ_CST); }
+// OSSpinLock: an int32, zero when free
+void I__OSSpinLockTry(CPU *c) { uint32_t free_ = 0; RET(__atomic_compare_exchange_n(GP32(ARG(0)), &free_, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED) ? 1 : 0); }
+void I__OSSpinLockLock(CPU *c) {
+    uint32_t *l = GP32(ARG(0));
+    for (int n = 0;; n++) {
+        uint32_t free_ = 0;
+        if (__atomic_compare_exchange_n(l, &free_, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+        if (n > 100) sched_yield();
+    }
+}
+void I__OSSpinLockUnlock(CPU *c) { __atomic_store_n(GP32(ARG(0)), 0, __ATOMIC_RELEASE); }
+
+// ---- malloc zones ----
+// A program that brings its own allocator (tcmalloc) registers it as a zone so that the system's malloc reaches it.
+// Here malloc is the runtime's: the zone calls are accepted and change nothing, and every zone is the one zone.
+static uint32_t the_zone(void) {
+    static uint32_t z;
+    if (!z) { z = gmalloc(256); memset(M + z, 0, 256); }
+    return z;
+}
+void I__malloc_default_zone(CPU *c) { RET(the_zone()); }
+void I__malloc_default_purgeable_zone(CPU *c) { RET(the_zone()); }
+void I__malloc_create_zone(CPU *c) { RET(the_zone()); }
+void I__malloc_destroy_zone(CPU *c) {}
+void I__malloc_set_zone_name(CPU *c) {}
+void I__malloc_zone_register(CPU *c) {}
+void I__malloc_zone_unregister(CPU *c) {}
+void I__malloc_zone_malloc(CPU *c) { RET(gmalloc(ARG(1))); }
+void I__malloc_zone_free(CPU *c) { gfree(ARG(1)); }
