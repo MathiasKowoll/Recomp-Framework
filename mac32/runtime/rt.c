@@ -1,4 +1,5 @@
 // Core runtime: guest address space, image loader, dispatch, heap, setjmp.
+#include <fenv.h>
 #include "rt.h"
 #include "tables.h"
 #include <stdio.h>
@@ -340,7 +341,16 @@ CPU *cpu_new(uint32_t stack_size) {
     c->stack_lo = c->stack_hi - stack_size;
     c->esp = c->stack_hi - 64;
     c->fcw = 0x37F;
+    c->mxcsr = 0x1F80;
     return c;
+}
+
+// ldmxcsr. Bits 13-14 are the rounding mode, which the translated conversions take from the host (lrint); the
+// exception masks, flush-to-zero and denormals-are-zero are kept for stmxcsr and not applied.
+void cpu_set_mxcsr(CPU *c, uint32_t v) {
+    static const int mode[4] = {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO};
+    c->mxcsr = v;
+    fesetround(mode[(v >> 13) & 3]);
 }
 
 void cpu_cpuid(CPU *c) { c->eax = 1; c->ebx = c->ecx = c->edx = 0; }

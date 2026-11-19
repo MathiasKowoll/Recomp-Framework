@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <float.h>
 #include <setjmp.h>
 
 typedef union {
@@ -27,6 +28,7 @@ typedef struct CPU {
     uint16_t fcw;   // x87 control word (rounding mode used by fistp)
     uint32_t stack_lo, stack_hi;
     uint32_t fn;    // guest function currently executing (debug)
+    uint32_t mxcsr; // SSE control and status: its rounding mode is given to the host, the rest is only kept
 } CPU;
 
 typedef void (*gfn)(CPU *c);
@@ -90,6 +92,34 @@ void missing_func(CPU *c, uint32_t addr, uint32_t from);
 void bad_jump(CPU *c, uint32_t target, uint32_t from);
 void bad_insn(CPU *c, uint32_t addr);
 int32_t cvtt_i32(double v);
+void cpu_set_mxcsr(CPU *c, uint32_t v);
+// to an integer in the current rounding mode; out of range and NaN give the processor's "integer indefinite"
+static inline int32_t cvtr_i32(double v) { return (v >= -2147483648.0 && v < 2147483648.0) ? (int32_t)lrint(v) : INT32_MIN; }
+static inline int64_t cvtt_i64(double v) { return (v >= -9223372036854775808.0 && v < 9223372036854775808.0) ? (int64_t)v : INT64_MIN; }
+// rcpps and rsqrtps. The processor's are approximations to 12 bits and these are exact, but its edges are kept:
+// a denormal operand counts as zero, and a result too small for a normal float is zero.
+static inline float rcp_f(float v) {
+    if (fabsf(v) < FLT_MIN) return copysignf(INFINITY, v);
+    float r = 1.0f / v;
+    return fabsf(r) < FLT_MIN ? copysignf(0.0f, r) : r;
+}
+static inline float rsqrt_f(float v) { return fabsf(v) < FLT_MIN ? copysignf(INFINITY, v) : 1.0f / sqrtf(v); }
+// The ten-byte extended format of fld and fstp: 64 bits of mantissa with its leading one written out, then the
+// sign and 15 bits of exponent. The x87 stack is kept at double precision, so the last 11 bits are rounded away.
+static inline double rdt(uint32_t a) {
+    uint64_t m = rd64(a); uint16_t se = rd16(a + 8);
+    int e = se & 0x7FFF;
+    double v = e == 0x7FFF ? ((m << 1) ? NAN : INFINITY) : ldexp((double)m, (e ? e : 1) - 16383 - 63);
+    return (se & 0x8000) ? -v : v;
+}
+static inline void wrt(uint32_t a, double v) {
+    uint16_t se = signbit(v) ? 0x8000 : 0; uint64_t m = 0;
+    v = fabs(v);
+    if (isnan(v)) { m = 3ull << 62; se |= 0x7FFF; }
+    else if (isinf(v)) { m = 1ull << 63; se |= 0x7FFF; }
+    else if (v != 0) { int x; double f = frexp(v, &x); m = (uint64_t)ldexp(f, 64); se |= (uint16_t)(x - 1 + 16383); }
+    wr64(a, m); wr16(a + 8, se);
+}
 void cpu_cpuid(CPU *c);
 const char *rt_func_name(uint32_t addr);
 extern _Thread_local CPU *rt_cur;

@@ -51,6 +51,8 @@ class FuncGen:
         m = op.mem
         if m.segment not in (0, X.X86_REG_ES, X.X86_REG_DS):
             raise Unsupported("segment " + self.rn(m.segment))
+        for r in (m.base, m.index):   # an address-size prefix: bx+si and the like, which no compiler emits
+            if r and self.rn(r) not in R32: raise Unsupported("16-bit address")
         parts = []
         if m.base:
             parts.append("C." + self.rn(m.base))
@@ -114,9 +116,67 @@ class FuncGen:
                 return p.operands[1].imm + 1
         return None
 
+    PC_THUNK = {0x04, 0x0c, 0x14, 0x1c, 0x2c, 0x34, 0x3c}   # mov reg, [esp] ; ret (___i686.get_pc_thunk.*)
+
+    def relative_tables(self, seen, pic):
+        """Switches of position-independent code: mov r, [b + i*4 + d] ; add r, b ; jmp r, where b holds the
+        function's PIC base (the address after its `call next`) and each entry is a case's distance from that
+        base. Returns the cases of the tables not seen before."""
+        if len(pic) != 1: return []
+        base, found = next(iter(pic)), []
+        for i in [x for x in seen.values() if x]:
+            if i.address in self.tables or i.mnemonic != "jmp" or i.operands[0].type != X.X86_OP_REG: continue
+            r = i.operands[0].reg
+            prev = sorted((x for x in seen.values() if x and i.address - 64 <= x.address < i.address), key=lambda x: x.address)
+            add = load = None
+            for p in reversed(prev[-4:]):
+                o = p.operands
+                if len(o) != 2 or o[0].type != X.X86_OP_REG or o[0].reg != r: continue
+                if add is None:
+                    if p.mnemonic == "add" and o[1].type == X.X86_OP_REG: add = p
+                    else: break
+                elif p.mnemonic == "mov" and o[1].type == X.X86_OP_MEM and o[1].mem.base == add.operands[1].reg \
+                        and o[1].mem.index and o[1].mem.scale == 4:
+                    load = p; break
+                else: break
+            if not load: continue
+            m = load.operands[1].mem
+            limit = None
+            for p in reversed(prev):
+                if p.address >= load.address: continue
+                o = p.operands
+                if p.mnemonic == "cmp" and len(o) == 2 and o[0].type == X.X86_OP_REG and o[0].reg == m.index \
+                        and o[1].type == X.X86_OP_IMM:
+                    limit = o[1].imm + 1; break
+            tbl, ta = [], (base + m.disp) & 0xFFFFFFFF
+            while len(tbl) < (limit or 4096):
+                try: t = (base + int.from_bytes(self.img.read(ta, 4), "little")) & 0xFFFFFFFF
+                except KeyError: break
+                if not (self.addr <= t < self.end): break
+                tbl.append(t); ta += 4
+            self.tables[i.address] = (tbl, None)
+            found.extend(tbl)
+        return found
+
     def descend(self):
         seen, work, out = {}, [self.addr], []
         self.tables = {}
+        pic = set()
+        while True:
+            self.walk(seen, work, pic)
+            work = [t for t in self.relative_tables(seen, pic) if t not in seen]
+            if not work: break
+        ins = sorted((x for x in seen.values() if x), key=lambda x: x.address)
+        # trim tables using the cmp guard now that we have linear context
+        for k, i in enumerate(ins):
+            if i.address in self.tables:
+                tbl, reg = self.tables[i.address]
+                lim = self.table_limit(k, ins, reg) if reg is not None else None
+                if lim: self.tables[i.address] = (tbl[:lim], reg)
+        self.bad_decode = [a for a, x in seen.items() if x is None]
+        return ins
+
+    def walk(self, seen, work, pic):
         while work:
             a = work.pop()
             while a not in seen:
@@ -142,18 +202,17 @@ class FuncGen:
                             tbl.append(t); ta += 4; n += 1
                         self.tables[i.address] = (tbl, op.mem.index)
                         work.extend(tbl)
+                if m == "call" and i.operands and i.operands[0].type == X.X86_OP_IMM:
+                    t = i.operands[0].imm
+                    if t == i.address + i.size: pic.add(t)
+                    elif t not in self.img.stubs:
+                        try: b = self.img.read(t, 4)
+                        except KeyError: b = b""
+                        if len(b) == 4 and b[0] == 0x8B and b[1] in self.PC_THUNK and b[2] == 0x24 and b[3] == 0xC3:
+                            pic.add(i.address + i.size)
                 if m in ("ret", "jmp", "ud2", "hlt", "retf", "ljmp") or m.startswith("ret"):
                     break
                 a = i.address + i.size
-        ins = sorted((x for x in seen.values() if x), key=lambda x: x.address)
-        # trim tables using the cmp guard now that we have linear context
-        for k, i in enumerate(ins):
-            if i.address in self.tables:
-                tbl, reg = self.tables[i.address]
-                lim = self.table_limit(k, ins, reg)
-                if lim: self.tables[i.address] = (tbl[:lim], reg)
-        self.bad_decode = [a for a, x in seen.items() if x is None]
-        return ins
 
     def gen(self):
         for i in self.ins:
@@ -576,8 +635,6 @@ class FuncGen:
             k = ops[1].imm
             ex = ("%s.u[k] >> %d" if m == "psrld" else "(uint32_t)(%s.i[k] >> %d)") % (self.xmm(d), min(k, 31))
             e("for (int k = 0; k < 4; k++) %s.u[k] = %s;" % (self.xmm(d), "0" if (k > 31 and m == "psrld") else ex)); return True
-        if m in ("unpcklps", "unpcklpd", "shufps", "movlhps", "movhlps", "cvtps2pd", "cvtpd2ps"):
-            raise Unsupported(m)
         if m in ("xorps", "andps", "orps", "por", "pxor", "pand", "andnps", "andnpd", "xorpd", "andpd", "orpd") and not isx(d):
             raise Unsupported("mmx " + m)
         ar = {"add": "+", "sub": "-", "mul": "*", "div": "/"}
@@ -624,6 +681,154 @@ class FuncGen:
         if m == "pslld" and ops[1].type == X.X86_OP_IMM:
             c = ops[1].imm
             e("for (int k = 0; k < 4; k++) %s.u[k] = %s;" % (self.xmm(d), "0" if c > 31 else "%s.u[k] << %d" % (self.xmm(d), c))); return True
+        return self.packed(m, ops)
+
+    # ---------- packed SSE: every lane of the register ----------
+    # name: (field of XMM, lanes, value of lane k from a (destination) and s (source))
+    LANES = {
+        "paddb": ("b", 16, "a.b[k] + s.b[k]"), "psubb": ("b", 16, "a.b[k] - s.b[k]"),
+        "paddw": ("w", 8, "a.w[k] + s.w[k]"), "psubw": ("w", 8, "a.w[k] - s.w[k]"),
+        "psubd": ("u", 4, "a.u[k] - s.u[k]"), "paddq": ("q", 2, "a.q[k] + s.q[k]"), "psubq": ("q", 2, "a.q[k] - s.q[k]"),
+        "paddusb": ("b", 16, "a.b[k] + s.b[k] > 0xFF ? 0xFF : a.b[k] + s.b[k]"),
+        "paddusw": ("w", 8, "a.w[k] + s.w[k] > 0xFFFF ? 0xFFFF : a.w[k] + s.w[k]"),
+        "psubusb": ("b", 16, "a.b[k] > s.b[k] ? a.b[k] - s.b[k] : 0"),
+        "psubusw": ("w", 8, "a.w[k] > s.w[k] ? a.w[k] - s.w[k] : 0"),
+        "pmullw": ("w", 8, "(uint16_t)((int16_t)a.w[k] * (int16_t)s.w[k])"),
+        "pmulhw": ("w", 8, "(uint16_t)(((int32_t)(int16_t)a.w[k] * (int16_t)s.w[k]) >> 16)"),
+        "pmulhuw": ("w", 8, "(uint16_t)(((uint32_t)a.w[k] * s.w[k]) >> 16)"),
+        "pminub": ("b", 16, "a.b[k] < s.b[k] ? a.b[k] : s.b[k]"), "pmaxub": ("b", 16, "a.b[k] > s.b[k] ? a.b[k] : s.b[k]"),
+        "pminsw": ("w", 8, "(int16_t)a.w[k] < (int16_t)s.w[k] ? a.w[k] : s.w[k]"),
+        "pmaxsw": ("w", 8, "(int16_t)a.w[k] > (int16_t)s.w[k] ? a.w[k] : s.w[k]"),
+        "pavgb": ("b", 16, "(a.b[k] + s.b[k] + 1) >> 1"), "pavgw": ("w", 8, "(a.w[k] + s.w[k] + 1) >> 1"),
+        "pcmpeqb": ("b", 16, "a.b[k] == s.b[k] ? 0xFF : 0"), "pcmpeqw": ("w", 8, "a.w[k] == s.w[k] ? 0xFFFF : 0"),
+        "pcmpeqd": ("u", 4, "a.u[k] == s.u[k] ? 0xFFFFFFFFu : 0"),
+        "pcmpgtb": ("b", 16, "(int8_t)a.b[k] > (int8_t)s.b[k] ? 0xFF : 0"),
+        "pcmpgtw": ("w", 8, "(int16_t)a.w[k] > (int16_t)s.w[k] ? 0xFFFF : 0"),
+        "pcmpgtd": ("u", 4, "a.i[k] > s.i[k] ? 0xFFFFFFFFu : 0"),
+        # the source when either is a NaN, and when both are zero
+        "maxps": ("f", 4, "a.f[k] > s.f[k] ? a.f[k] : s.f[k]"), "minps": ("f", 4, "a.f[k] < s.f[k] ? a.f[k] : s.f[k]"),
+        "maxpd": ("d", 2, "a.d[k] > s.d[k] ? a.d[k] : s.d[k]"), "minpd": ("d", 2, "a.d[k] < s.d[k] ? a.d[k] : s.d[k]"),
+        "sqrtps": ("f", 4, "sqrtf(s.f[k])"), "sqrtpd": ("d", 2, "sqrt(s.d[k])"),
+        "rsqrtps": ("f", 4, "rsqrt_f(s.f[k])"), "rcpps": ("f", 4, "rcp_f(s.f[k])"),
+        "cvtdq2ps": ("f", 4, "(float)s.i[k]"), "cvtps2dq": ("i", 4, "cvtr_i32(s.f[k])"),
+    }
+    # name: (field, lanes, 1 for the upper half): the lanes of a and s, taken in turn
+    INTERLEAVE = {
+        "punpcklbw": ("b", 16, 0), "punpckhbw": ("b", 16, 1), "punpcklwd": ("w", 8, 0), "punpckhwd": ("w", 8, 1),
+        "punpckldq": ("u", 4, 0), "punpckhdq": ("u", 4, 1), "punpcklqdq": ("q", 2, 0), "punpckhqdq": ("q", 2, 1),
+        "unpcklps": ("u", 4, 0), "unpckhps": ("u", 4, 1), "unpcklpd": ("q", 2, 0), "unpckhpd": ("q", 2, 1),
+    }
+    PREDICATE = {"eq": "a == b", "lt": "a < b", "le": "a <= b", "unord": "a != a || b != b",
+                 "neq": "!(a == b)", "nlt": "!(a < b)", "nle": "!(a <= b)", "ord": "a == a && b == b"}
+
+    def packed(self, m, ops):
+        e = self.e
+        if m.startswith("prefetch") or m in ("lfence", "mfence", "sfence", "pause"): return True
+        if not ops: return False
+        def isx(op): return op.type == X.X86_OP_REG and (self.rn(op.reg) or "").startswith("xmm")
+        def src(op): return self.xmm(op) if isx(op) else "rdx(%s)" % self.mem_addr(op)
+        d = ops[0]
+        imm = ops[-1].imm & 0xFF if ops[-1].type == X.X86_OP_IMM else None
+        if m in ("ldmxcsr", "stmxcsr"):
+            a = self.mem_addr(d)
+            e("cpu_set_mxcsr(c, rd32(%s));" % a if m == "ldmxcsr" else "wr32(%s, C.mxcsr);" % a); return True
+        # ---- into a general register ----
+        if m in ("movmskps", "movmskpd", "pmovmskb") and isx(ops[1]):
+            v = {"movmskps": "(s.u[0] >> 31) | (s.u[1] >> 31) << 1 | (s.u[2] >> 31) << 2 | (s.u[3] >> 31) << 3",
+                 "movmskpd": "(uint32_t)(s.q[0] >> 63) | (uint32_t)(s.q[1] >> 63) << 1", "pmovmskb": "r"}[m]
+            pre = "uint32_t r = 0; for (int k = 0; k < 16; k++) r |= (uint32_t)(s.b[k] >> 7) << k; " if m == "pmovmskb" else ""
+            e("{ XMM s = %s; %s%s }" % (self.xmm(ops[1]), pre, self.wr(d, v))); return True
+        if m == "pextrw" and isx(ops[1]) and not isx(d):
+            e(self.wr(d, "(uint32_t)%s.w[%d]" % (self.xmm(ops[1]), imm & 7))); return True
+        if not isx(d):
+            if m in ("movupd", "movntps", "movntpd", "movntdq") and d.type == X.X86_OP_MEM and isx(ops[1]):
+                e("wrx(%s, %s);" % (self.mem_addr(d), self.xmm(ops[1]))); return True
+            return False   # MMX registers and the rest
+        D = self.xmm(d)
+        if len(ops) < 2: return False
+        s1 = ops[1]
+        if m in ("movupd", "lddqu"):
+            e("%s = %s;" % (D, src(s1))); return True
+        if m == "pinsrw":
+            e("%s.w[%d] = (uint16_t)(%s);" % (D, imm & 7, self.rd(s1, 4) if s1.type == X.X86_OP_REG else self.rd(s1, 2))); return True
+        # ---- one lane ----
+        if m in ("rsqrtss", "rcpss"):
+            v = "%s.f[0]" % self.xmm(s1) if isx(s1) else "rdf(%s)" % self.mem_addr(s1)
+            e("%s.f[0] = %s(%s);" % (D, "rsqrt_f" if m == "rsqrtss" else "rcp_f", v)); return True
+        # ---- two halves that are not the whole of the source ----
+        if m == "movhlps": e("%s.q[0] = %s.q[1];" % (D, self.xmm(s1))); return True
+        if m == "movlhps": e("%s.q[1] = %s.q[0];" % (D, self.xmm(s1))); return True
+        if m == "cvtps2pd":   # two floats: eight bytes of memory, not sixteen
+            if isx(s1): e("{ XMM s = %s; %s.d[0] = s.f[0]; %s.d[1] = s.f[1]; }" % (self.xmm(s1), D, D))
+            else: e("{ uint32_t p = %s; float f0 = rdf(p), f1 = rdf(p + 4); %s.d[0] = f0; %s.d[1] = f1; }" % (self.mem_addr(s1), D, D))
+            return True
+        if m == "pshuflw" or m == "pshufhw":
+            o = 4 if m == "pshufhw" else 0
+            e("{ XMM s = %s, x = s; %s %s = x; }" % (src(s1), " ".join("x.w[%d] = s.w[%d];" % (o + k, o + ((imm >> 2 * k) & 3)) for k in range(4)), D))
+            return True
+        if m == "pshufd":
+            e("{ XMM s = %s, x; %s %s = x; }" % (src(s1), " ".join("x.u[%d] = s.u[%d];" % (k, (imm >> 2 * k) & 3) for k in range(4)), D))
+            return True
+        def both(body):   # a: the destination as it was, s: the source, x: the result
+            e("{ XMM a = %s, s = %s, x = a; %s %s = x; }" % (D, src(s1), body, D))
+        if m in self.LANES:
+            f, n, v = self.LANES[m]
+            both("for (int k = 0; k < %d; k++) x.%s[k] = %s;" % (n, f, v)); return True
+        if m in self.INTERLEAVE:
+            f, n, hi = self.INTERLEAVE[m]
+            both("for (int k = 0; k < %d; k++) { x.%s[2 * k] = a.%s[k + %d]; x.%s[2 * k + 1] = s.%s[k + %d]; }"
+                 % (n // 2, f, f, hi * n // 2, f, f, hi * n // 2)); return True
+        if m == "pandn":
+            both("x.q[0] = ~a.q[0] & s.q[0]; x.q[1] = ~a.q[1] & s.q[1];"); return True
+        if m == "shufps":
+            both("x.u[0] = a.u[%d]; x.u[1] = a.u[%d]; x.u[2] = s.u[%d]; x.u[3] = s.u[%d];"
+                 % (imm & 3, (imm >> 2) & 3, (imm >> 4) & 3, (imm >> 6) & 3)); return True
+        if m == "shufpd":
+            both("x.q[0] = a.q[%d]; x.q[1] = s.q[%d];" % (imm & 1, (imm >> 1) & 1)); return True
+        if m == "pmuludq":
+            both("x.q[0] = (uint64_t)a.u[0] * s.u[0]; x.q[1] = (uint64_t)a.u[2] * s.u[2];"); return True
+        if m == "pmaddwd":
+            both("for (int k = 0; k < 4; k++) x.i[k] = (int16_t)a.w[2 * k] * (int16_t)s.w[2 * k] + (int16_t)a.w[2 * k + 1] * (int16_t)s.w[2 * k + 1];")
+            return True
+        if m in ("packsswb", "packuswb", "packssdw"):
+            f, g, n, lo, hi = {"packsswb": ("b", "(int16_t)%s.w", 8, -128, 127), "packuswb": ("b", "(int16_t)%s.w", 8, 0, 255),
+                               "packssdw": ("w", "%s.i", 4, -32768, 32767)}[m]
+            both("for (int k = 0; k < %d; k++) { int32_t p = %s[k], q = %s[k]; x.%s[k] = p < %d ? %d : p > %d ? %d : p;"
+                 " x.%s[k + %d] = q < %d ? %d : q > %d ? %d : q; }" % (n, g % "a", g % "s", f, lo, lo, hi, hi, f, n, lo, lo, hi, hi))
+            return True
+        h = re.match(r"(p?)h(add|sub)(ps|pd|d|w)$", m)
+        if h:
+            f, n = {"ps": ("f", 4), "pd": ("d", 2), "d": ("u", 4), "w": ("w", 8)}[h.group(3)]
+            o = "+" if h.group(2) == "add" else "-"
+            both("for (int k = 0; k < %d; k++) { x.%s[k] = a.%s[2 * k] %s a.%s[2 * k + 1]; x.%s[k + %d] = s.%s[2 * k] %s s.%s[2 * k + 1]; }"
+                 % (n // 2, f, f, o, f, f, n // 2, f, o, f)); return True
+        cp = re.match(r"cmp(eq|lt|le|unord|neq|nlt|nle|ord)?(ps|pd)$", m)
+        if cp and (cp.group(1) or (imm is not None and imm < 8)):
+            pred = cp.group(1) or ["eq", "lt", "le", "unord", "neq", "nlt", "nle", "ord"][imm]
+            f, n, g, ones, ty = ("f", 4, "u", "0xFFFFFFFFu", "float") if cp.group(2) == "ps" else ("d", 2, "q", "~0ull", "double")
+            both("for (int k = 0; k < %d; k++) { %s a = %s.%s[k], b = s.%s[k]; x.%s[k] = (%s) ? %s : 0; }"
+                 % (n, ty, D, f, f, g, self.PREDICATE[pred], ones)); return True
+        if m == "cvtpd2ps":
+            both("x.f[0] = (float)s.d[0]; x.f[1] = (float)s.d[1]; x.q[1] = 0;"); return True
+        if m == "cvtpd2dq":
+            both("x.i[0] = cvtr_i32(s.d[0]); x.i[1] = cvtr_i32(s.d[1]); x.q[1] = 0;"); return True
+        if m == "pshufb":
+            both("for (int k = 0; k < 16; k++) x.b[k] = (s.b[k] & 0x80) ? 0 : a.b[s.b[k] & 15];"); return True
+        if m == "palignr":
+            both("for (int k = 0; k < 16; k++) { int j = k + %d; x.b[k] = j < 16 ? s.b[j] : j < 32 ? a.b[j - 16] : 0; }" % imm); return True
+        if m in ("pslldq", "psrldq") and imm is not None:
+            j = "k - %d" % imm if m == "pslldq" else "k + %d" % imm
+            e("{ XMM a = %s, x; for (int k = 0; k < 16; k++) { int j = %s; x.b[k] = (j >= 0 && j < 16) ? a.b[j] : 0; } %s = x; }" % (D, j, D))
+            return True
+        sh = re.match(r"ps(ll|rl|ra)(w|d|q)$", m)
+        if sh and not (sh.group(1) == "ra" and sh.group(2) == "q"):
+            bits, f, n, st = {"w": (16, "w", 8, "int16_t"), "d": (32, "u", 4, "int32_t"), "q": (64, "q", 2, "int64_t")}[sh.group(2)]
+            cnt = "%du" % imm if s1.type == X.X86_OP_IMM else "%s.q[0]" % ("s")
+            pre = "" if s1.type == X.X86_OP_IMM else "XMM s = %s; " % src(s1)
+            if sh.group(1) == "ra": v = "(%s)a.%s[k] >> (n > %d ? %d : n)" % (st, f, bits - 1, bits - 1)
+            else: v = "n > %d ? 0 : a.%s[k] %s n" % (bits - 1, f, "<<" if sh.group(1) == "ll" else ">>")
+            e("{ %sXMM a = %s, x; uint64_t n = %s; for (int k = 0; k < %d; k++) x.%s[k] = %s; %s = x; }" % (pre, D, cnt, n, f, v, D))
+            return True
         return False
 
     # ---------- x87 ----------
@@ -637,6 +842,8 @@ class FuncGen:
                 a = self.mem_addr(op)
                 rdm = {4: "rdf", 8: "rdd"}.get(op.size)
                 wrm = {4: "wrf", 8: "wrd"}.get(op.size)
+                if op.size == 10 and m != "fst":   # the stack is kept at double precision
+                    e("FPUSH(rdt(%s));" % a if m == "fld" else "wrt(%s, ST(0)); FPOP();" % a); return True
                 if not rdm: raise Unsupported("x87 m%d" % (8 * op.size))
                 if m == "fld": e("FPUSH(%s(%s));" % (rdm, a))
                 else: e("%s(%s, (%s)ST(0));%s" % (wrm, a, "float" if op.size == 4 else "double", " FPOP();" if m == "fstp" else ""))
@@ -669,6 +876,11 @@ class FuncGen:
             e("FPUSH((double)(%s)%s);" % (ST[ops[0].size], self.rd(ops[0]))); return True
         if m == "fistp" and ops[0].type == X.X86_OP_MEM:
             e("%s FPOP();" % self.wr(ops[0], "(%s)fpu_round(c, ST(0))" % ST[ops[0].size])); return True
+        if m == "fist" and ops[0].type == X.X86_OP_MEM:
+            e(self.wr(ops[0], "(%s)fpu_round(c, ST(0))" % ST[ops[0].size])); return True
+        if m == "fisttp" and ops[0].type == X.X86_OP_MEM:   # towards zero, whatever the control word says
+            v = "cvtt_i64(ST(0))" if ops[0].size == 8 else "(%s)cvtt_i32(ST(0))" % ST[ops[0].size]
+            e("%s FPOP();" % self.wr(ops[0], v)); return True
         return False
 
 
@@ -747,7 +959,8 @@ class Translator:
             f.write("".join('  {"%s", 0x%x, 0x%x, 0x%x, 0x%x},\n' % s for s in self.img.segments))
             f.write("};\nconst int ngsegs = %d;\n" % len(self.img.segments))
         print("functions: %d (%d from symbols, %d more from LC_FUNCTION_STARTS)  imports used: %d"
-              % (len(funcs), self.img.func_from_symbols, self.img.func_from_starts, len(self.imports)))
+              % (len(funcs), sum(a not in self.img.func_unnamed for a in funcs),
+                 sum(a in self.img.func_unnamed for a in funcs), len(self.imports)))
         if self.unsupported:
             print("UNSUPPORTED:", self.unsupported)
 

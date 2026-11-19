@@ -58,7 +58,6 @@ class Image:
         # ...and every entry of LC_FUNCTION_STARTS, which the linker writes whether or not the symbols were kept:
         # a stripped executable has few of the former and all of the latter. The table is a list of ULEB128
         # distances, the first from the start of __TEXT and each of the rest from the entry before it.
-        nsym = len(fn)
         fs = b.function_starts if b.has_function_starts else None
         if fs:
             a, p, end = self.text.segment.virtual_address, fs.data_offset, fs.data_offset + fs.data_size
@@ -72,7 +71,7 @@ class Image:
                 a += d
                 if lo <= a < hi and a not in fn:
                     fn[a] = "sub_%x" % a
-        self.func_from_symbols, self.func_from_starts = nsym, len(fn) - nsym
+        self.func_unnamed = {a for a, n in fn.items() if n == "sub_%x" % a}
         self.func_addrs = sorted(fn)
         self.func_names = fn
         self.name_to_addr = {v: k for k, v in fn.items()}
