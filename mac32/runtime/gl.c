@@ -41,6 +41,16 @@ void *gl_ptr_element(uint32_t g) {
     return b ? (void *)(uintptr_t)g : (g ? G2H(g) : NULL);
 }
 
+// Pixel data: a byte offset into the pixel buffer object when one is bound for that direction
+void *gl_ptr_unpack(uint32_t g) {
+    GLint b = 0; glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &b);
+    return b ? (void *)(uintptr_t)g : (g ? G2H(g) : NULL);
+}
+void *gl_ptr_pack(uint32_t g) {
+    GLint b = 0; glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &b);
+    return b ? (void *)(uintptr_t)g : (g ? G2H(g) : NULL);
+}
+
 // glGetString: host strings live outside guest memory; copy each into a guest buffer once
 void I__glGetString(CPU *c) {
     static uint32_t cache[16]; static GLenum keys[16];
