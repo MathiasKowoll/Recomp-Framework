@@ -626,6 +626,14 @@ class FuncGen:
             e("C.edx = (C.edx & 0xFFFF0000u) | (((int16_t)C.eax < 0) ? 0xFFFFu : 0);"); return True
         if m == "xchg":
             a, b = ops
+            # With a memory operand the processor locks the exchange whether or not the prefix is written: it is how
+            # spinlocks are taken. A plain read-then-write here let two threads both take the lock.
+            mem, reg = (a, b) if a.type == X.X86_OP_MEM else (b, a) if b.type == X.X86_OP_MEM else (None, None)
+            if mem is not None:
+                ty = {1: "uint8_t", 2: "uint16_t", 4: "uint32_t"}[mem.size]
+                e("{ %s t = __atomic_exchange_n((%s *)(M + %s), (%s)%s, __ATOMIC_SEQ_CST); %s }"
+                  % (ty, ty, self.mem_addr(mem), ty, self.rd(reg), self.wr(reg, "t")))
+                return True
             e("{ uint32_t t = %s; %s %s }" % (self.rd(a), self.wr(a, self.rd(b)), self.wr(b, "t")))
             return True
         if m == "pushfd":
@@ -643,6 +651,12 @@ class FuncGen:
         if m.startswith("lock "):
             op = m[5:]
             d = ops[0]
+            if op == "cmpxchg8b" and d.type == X.X86_OP_MEM:
+                # edx:eax against the 64 bits in memory: equal -> ecx:ebx goes in (zf); else memory comes back in edx:eax
+                e("{ uint64_t exp = ((uint64_t)C.edx << 32) | C.eax, v = ((uint64_t)C.ecx << 32) | C.ebx; "
+                  "zf = __atomic_compare_exchange_n((uint64_t *)(M + %s), &exp, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); "
+                  "if (!zf) { C.eax = (uint32_t)exp; C.edx = (uint32_t)(exp >> 32); } }" % self.mem_addr(d))
+                return True
             if d.type != X.X86_OP_MEM or d.size != 4: raise Unsupported(m)
             p = "(uint32_t *)(M + %s)" % self.mem_addr(d)
             if op == "xadd":
