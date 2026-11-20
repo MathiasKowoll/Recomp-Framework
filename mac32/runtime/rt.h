@@ -29,7 +29,11 @@ typedef struct CPU {
     uint32_t stack_lo, stack_hi;
     uint32_t fn;    // guest function currently executing (debug)
     uint32_t mxcsr; // SSE control and status: its rounding mode is given to the host, the rest is only kept
+    // A C++ exception in flight (eh.c): the flag every call is followed by a test of, and what was thrown.
+    uint32_t exc, exc_obj, exc_type, exc_dtor;
 } CPU;
+int eh_land(struct CPU *c, uint32_t lsda, uint32_t action);
+void eh_uncaught(struct CPU *c, const char *where);
 
 typedef void (*gfn)(CPU *c);
 extern uint8_t rt_watch[];

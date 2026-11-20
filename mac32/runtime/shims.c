@@ -166,6 +166,8 @@ void I____error(CPU *c)    { RET(g_errno); }
 void I__strerror_UNIX2003(CPU *c) { static uint32_t g; if (g) gfree(g); g = gstrdup(strerror((int)ARG(0))); RET(g); }
 
 // ---------- heap ----------
+uint32_t eh_guest_alloc(uint32_t n) { return gmalloc(n); }   // for eh.c: where exception objects live
+void eh_guest_free(uint32_t p) { gfree(p); }
 void I__malloc(CPU *c)  { RET(gmalloc(ARG(0))); }
 void I__calloc(CPU *c)  { uint32_t n = ARG(0) * ARG(1), p = gmalloc(n); memset(M + p, 0, n); RET(p); }
 void I__realloc(CPU *c) { RET(grealloc(ARG(0), ARG(1))); }

@@ -190,3 +190,107 @@ class Image:
     def func_containing(self, addr):
         i = bisect.bisect_right(self.func_addrs, addr) - 1
         return self.func_addrs[i] if i >= 0 else None
+
+    # ---------- C++ exception tables ----------
+    # A function that has something to do when an exception passes through it (run a destructor, catch) has a
+    # table saying, for each stretch of its code that calls something, where to go: its landing pad. The table (the
+    # LSDA, in __gcc_except_tab) is found through the function's entry in __eh_frame.
+    def _enc(self, pos, enc):
+        """A pointer encoded as DWARF EH says (DW_EH_PE_*) at address pos: (value, next position)."""
+        if enc == 0xFF: return None, pos
+        fmt = enc & 0x0F
+        if fmt in (0x00, 0x03):   v = int.from_bytes(self.read(pos, 4), "little"); n = 4            # absptr, udata4
+        elif fmt == 0x0B:         v = int.from_bytes(self.read(pos, 4), "little", signed=True); n = 4   # sdata4
+        elif fmt == 0x02:         v = int.from_bytes(self.read(pos, 2), "little"); n = 2            # udata2
+        elif fmt == 0x0A:         v = int.from_bytes(self.read(pos, 2), "little", signed=True); n = 2   # sdata2
+        elif fmt == 0x01:         v, n = self._uleb(pos)
+        elif fmt == 0x09:         v, n = self._sleb(pos)
+        else: raise ValueError("pointer encoding 0x%x" % enc)
+        if v and (enc & 0x70) == 0x10: v = (v + pos) & 0xFFFFFFFF      # pcrel
+        if v and (enc & 0x80): v = int.from_bytes(self.read(v, 4), "little")   # indirect
+        return v, pos + n
+
+    def _uleb(self, pos):
+        v = sh = n = 0
+        while True:
+            b = self.read(pos + n, 1)[0]; n += 1
+            v |= (b & 0x7F) << sh; sh += 7
+            if not b & 0x80: return v, n
+
+    def _sleb(self, pos):
+        v = sh = n = 0
+        while True:
+            b = self.read(pos + n, 1)[0]; n += 1
+            v |= (b & 0x7F) << sh; sh += 7
+            if not b & 0x80:
+                if b & 0x40: v -= 1 << sh
+                return v, n
+
+    def eh_lsda(self):
+        """{function address: address of its LSDA}, from __eh_frame."""
+        if hasattr(self, "_lsda"): return self._lsda
+        self._lsda = out = {}
+        sec = {x.name: x for x in self.bin.sections}.get("__eh_frame")
+        if sec is None: return out
+        base, size = sec.virtual_address, sec.size
+        data = self.read(base, size)
+        cies = {}
+        pos = 0
+        while pos + 4 <= size:
+            length = int.from_bytes(data[pos:pos + 4], "little")
+            if length == 0: break
+            body = pos + 4
+            cid = int.from_bytes(data[body:body + 4], "little")
+            if cid == 0:   # a CIE: its augmentation says how the entries that use it are written
+                q = body + 5                                   # id, version
+                aug = b""
+                while data[q]: aug += bytes([data[q]]); q += 1
+                q += 1
+                _, n = self._uleb(base + q); q += n            # code alignment
+                _, n = self._sleb(base + q); q += n            # data alignment
+                q += 1                                         # return address register
+                lsda_enc, fde_enc = 0xFF, 0x00
+                if aug[:1] == b"z":
+                    _, n = self._uleb(base + q); q += n
+                    for ch in aug[1:]:
+                        if ch == ord("P"):
+                            enc = data[q]; q += 1
+                            _, nq = self._enc(base + q, enc & 0x7F); q = nq - base
+                        elif ch == ord("L"): lsda_enc = data[q]; q += 1
+                        elif ch == ord("R"): fde_enc = data[q]; q += 1
+                cies[pos] = (aug[:1] == b"z", lsda_enc, fde_enc)
+            else:
+                cie = cies.get(body - cid)
+                if cie and cie[0]:
+                    q = base + body + 4
+                    start, q = self._enc(q, cie[2])
+                    _, q = self._enc(q, cie[2] & 0x0F)         # the range is a length, never relative
+                    alen, n = self._uleb(q); q += n
+                    if alen and cie[1] != 0xFF:
+                        lsda, _ = self._enc(q, cie[1])
+                        if lsda: out[start] = lsda
+            pos += 4 + length
+        return out
+
+    def eh_sites(self, func):
+        """The call sites of a function's LSDA: [(start, end, landing pad or 0, action)], addresses absolute."""
+        lsda = self.eh_lsda().get(func)
+        if lsda is None: return None, []
+        pos = lsda
+        enc = self.read(pos, 1)[0]; pos += 1
+        lpstart = func
+        if enc != 0xFF: lpstart, pos = self._enc(pos, enc)
+        enc = self.read(pos, 1)[0]; pos += 1
+        if enc != 0xFF:
+            _, n = self._uleb(pos); pos += n
+        cs_enc = self.read(pos, 1)[0]; pos += 1
+        cs_len, n = self._uleb(pos); pos += n
+        end, sites = pos + cs_len, []
+        while pos < end:
+            a, pos = self._enc(pos, cs_enc & 0x0F)
+            ln, pos = self._enc(pos, cs_enc & 0x0F)
+            lp, pos = self._enc(pos, cs_enc & 0x0F)
+            act, n = self._uleb(pos); pos += n
+            sites.append((func + a, func + a + ln, lpstart + lp if lp else 0, act))
+        return lsda, sites
+

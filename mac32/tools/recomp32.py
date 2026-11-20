@@ -56,6 +56,11 @@ class FuncGen:
         self.tr, self.img, self.addr = tr, tr.img, addr
         self.end = self.img.func_end(addr)
         self.code = self.img.read(addr, self.end - addr)
+        # C++ exceptions: the call sites of the function's table, and the landing pads they lead to, which are code
+        # of the function that nothing jumps to (the unwinder does) and are translated with it.
+        self.lsda, self.sites = self.img.eh_sites(addr) if tr.eh else (None, [])
+        self.pads = {lp for _, _, lp, _ in self.sites if lp and addr <= lp < self.end}
+        tr.pads_out += sum(1 for _, _, lp, _ in self.sites if lp and not (addr <= lp < self.end))
         self.ins = self.descend()
         self.addrs = {i.address for i in self.ins}
         self.labels = set()
@@ -196,7 +201,7 @@ class FuncGen:
         return found
 
     def descend(self):
-        seen, work, out = {}, [self.addr], []
+        seen, work, out = {}, [self.addr] + sorted(self.pads), []
         self.tables = {}
         pic = set()
         while True:
@@ -247,7 +252,7 @@ class FuncGen:
                         except KeyError: b = b""
                         if len(b) == 4 and b[0] == 0x8B and b[1] in self.PC_THUNK and b[2] == 0x24 and b[3] == 0xC3:
                             pic.add(i.address + i.size)
-                if m in ("ret", "jmp", "ud2", "hlt", "retf", "ljmp") or m.startswith("ret"):
+                if m in ("ret", "jmp", "ud2", "hlt", "retf", "ljmp") or m.startswith("ret") or self.no_return(i):
                     break
                 a = i.address + i.size
 
@@ -258,6 +263,7 @@ class FuncGen:
                 if t in self.addrs: self.labels.add(t)
             if i.mnemonic == "jmp" and i.operands[0].type != X.X86_OP_IMM:
                 for t in self.jump_table(i): self.labels.add(t)
+        self.labels |= self.pads & self.addrs
         f = self.out
         f.append("void F_%x(CPU *c) { /* %s */" % (self.addr, self.img.func_names[self.addr]))
         f.append("    uint32_t cf = 0, zf = 0, sf = 0, of = 0, pf = 0; (void)cf; (void)zf; (void)sf; (void)of; (void)pf;")
@@ -276,6 +282,7 @@ class FuncGen:
                 f.append("L_%x:;" % i.address)
             try:
                 self.insn(i)
+                if self.no_return(i): self.e("return;   /* that call does not come back */")
             except Exception as ex:
                 self.e("bad_insn(c, 0x%x); /* %s %s : %s */" % (i.address, i.mnemonic, i.op_str, ex))
                 self.tr.unsupported[i.mnemonic] = self.tr.unsupported.get(i.mnemonic, 0) + 1
@@ -291,10 +298,43 @@ class FuncGen:
     def jump_table(self, i):
         return [t for t in self.tables.get(i.address, ([], 0))[0] if t in self.addrs]
 
-    @staticmethod
-    def ends_block(i):
+    # Imports that do not come back. What follows the call is not code of this path (after a landing pad's
+    # _Unwind_Resume there is the next pad, or a table): decoding on from it read data as instructions.
+    NO_RETURN = {"__Unwind_Resume", "__Unwind_Resume_or_Rethrow", "___cxa_throw", "___cxa_rethrow", "_abort", "_exit",
+                 "__exit", "___stack_chk_fail", "___assert_rtn", "__ZSt9terminatev", "___cxa_call_unexpected",
+                 "___cxa_bad_cast", "___cxa_bad_typeid", "___cxa_pure_virtual", "_longjmp", "__longjmp", "_siglongjmp"}
+
+    def no_return(self, i):
+        if i.mnemonic != "call" or not i.operands or i.operands[0].type != X.X86_OP_IMM: return False
+        t = self.img.stub_alias.get(i.operands[0].imm, i.operands[0].imm)
+        name = self.img.stubs.get(t)
+        if name: return name in self.NO_RETURN or name.startswith("__ZSt") and "__throw_" in name
+        return self.local_no_return(t)
+
+    def local_no_return(self, t):
+        """A function of the image that is a straight line into a call that does not come back (the compiler's
+        __clang_call_terminate: begin_catch, then terminate). After a call to it there is only padding."""
+        known = self.tr.noreturn
+        if t not in known:
+            known[t] = False
+            a, straight = t, t in self.img.func_names and t != self.addr
+            for _ in range(12 if straight else 0):
+                j = self.decode_at(a)
+                if j is None or j.group(cs.CS_GRP_JUMP) or j.mnemonic.startswith("ret"): break
+                if j.mnemonic == "call" and j.operands and j.operands[0].type == X.X86_OP_IMM:
+                    n = self.img.stubs.get(self.img.stub_alias.get(j.operands[0].imm, j.operands[0].imm))
+                    if n in self.NO_RETURN: known[t] = True; break
+                a = j.address + j.size
+        return known[t]
+
+    def decode_at(self, a):
+        try: code = self.img.read(a, 16)
+        except Exception: return None
+        return next(self.tr.md.disasm(code, a, 1), None)
+
+    def ends_block(self, i):
         m = i.mnemonic
-        return m in ("ret", "jmp", "ud2", "hlt", "retf", "ljmp") or m.startswith("ret")
+        return m in ("ret", "jmp", "ud2", "hlt", "retf", "ljmp") or m.startswith("ret") or self.no_return(i)
 
     def target(self, t, frm):
         """C statement for transferring control (tail call) to address t."""
@@ -504,8 +544,21 @@ class FuncGen:
         else:
             e("{ int64_t nn = (int64_t)(((uint64_t)C.edx << 32) | C.eax); int32_t dd = (int32_t)%s; C.eax = (uint32_t)(int32_t)(nn / dd); C.edx = (uint32_t)(int32_t)(nn %% dd); }" % v)
 
+    def unwound(self, i, stmt):
+        """A call, and what follows it if the callee comes back with a C++ exception in flight: to this function's
+        landing pad for the call if its table has one (with the frame's registers as they were), or out."""
+        if not self.tr.eh: return stmt
+        for a, b, lp, act in self.sites:
+            if a <= i.address < b:
+                if lp in self.pads and lp in self.addrs:
+                    return ("{ uint32_t s_sp = C.esp, s_bp = C.ebp, s_bx = C.ebx, s_si = C.esi, s_di = C.edi; %s "
+                            "if (C.exc) { C.esp = s_sp; C.ebp = s_bp; C.ebx = s_bx; C.esi = s_si; C.edi = s_di; "
+                            "if (eh_land(c, 0x%xu, %d)) goto L_%x; return; } }" % (stmt, self.lsda, act, lp))
+                break
+        return stmt + " if (C.exc) return;"
+
     def call(self, i, op, nxt):
-        e = self.e
+        e = lambda stmt: self.e(self.unwound(i, stmt) if "(c" in stmt and "gjmp_slot" not in stmt else stmt)
         if op.type == X.X86_OP_IMM:
             t = op.imm
             t = self.img.stub_alias.get(t, t)
@@ -936,6 +989,10 @@ class FuncGen:
 
 
 class Translator:
+    noreturn = {}    # functions of the image known (or not) to never return
+    eh = True        # translate landing pads and test for an exception after every call (--no-eh turns it off)
+    pads_out = 0     # landing pads that lie outside their function, which are not reached
+
     def __init__(self, img, lo, hi, hle_path=None):
         self.img, self.lo, self.hi = img, lo, hi
         self.md = cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_32)
@@ -1046,12 +1103,15 @@ class Translator:
         print("functions: %d (%d from symbols, %d more from LC_FUNCTION_STARTS and from calls, %d of them outside __text)"
               "  imports used: %d" % (len(funcs), sum(a not in self.img.func_unnamed for a in funcs),
                                       sum(a in self.img.func_unnamed for a in funcs), outside, len(self.imports)))
+        if self.eh:
+            print("C++ exceptions: %d functions have a table%s" % (len(self.img.eh_lsda()),
+                  "; %d landing pads lie outside their function and are not reached" % self.pads_out if self.pads_out else ""))
         if self.unsupported:
             print("UNSUPPORTED:", self.unsupported)
 
 
 if __name__ == "__main__":
-    # recomp32.py BINARY LO HI OUTDIR [--hle FILE]
+    # recomp32.py BINARY LO HI OUTDIR [--hle FILE] [--no-eh]
     #   BINARY  the original 32-bit Intel Mach-O executable
     #   LO HI   the address range (hex) to translate, normally the whole __text section
     #   --hle   guest functions replaced by native ones: "address name [outside]" per line; the runtime or the game
@@ -1060,5 +1120,7 @@ if __name__ == "__main__":
     hle = None
     if "--hle" in args:
         k = args.index("--hle"); hle = args[k + 1]; del args[k:k + 2]
+    if "--no-eh" in args:   # no landing pads and no test after calls: an exception thrown is then fatal
+        args.remove("--no-eh"); Translator.eh = False
     path, lo, hi, out = args[0], int(args[1], 16), int(args[2], 16), args[3]
     Translator(Image(path), lo, hi, hle).run(out)
