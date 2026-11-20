@@ -727,9 +727,9 @@ class FuncGen:
         if m == "cvttpd2dq":
             e("{ XMM s = %s; %s.i[0] = cvtt_i32(s.d[0]); %s.i[1] = cvtt_i32(s.d[1]); %s.q[1] = 0; }" % (src_x(ops[1]), self.xmm(d), self.xmm(d), self.xmm(d))); return True
         if m == "cvtsd2si":
-            e(self.wr(d, "(uint32_t)(int32_t)lrint(%s)" % src_d(ops[1]))); return True
+            e(self.wr(d, "(uint32_t)cvtr_i32(%s)" % src_d(ops[1]))); return True   # out of range or NaN: 0x80000000
         if m == "cvtss2si":
-            e(self.wr(d, "(uint32_t)(int32_t)lrintf(%s)" % src_f(ops[1]))); return True
+            e(self.wr(d, "(uint32_t)cvtr_i32((double)%s)" % src_f(ops[1]))); return True
         mp = re.match(r"(add|sub|mul|div)pd$", m)
         if mp:
             o = {"add": "+", "sub": "-", "mul": "*", "div": "/"}[mp.group(1)]

@@ -29,8 +29,61 @@ import recomp32
 
 # instruction, how its result lanes are compared: i exact, f floats, d doubles, ~ floats to 1 part in 2048,
 # m exact and with the carry and overflow flags
+# c exact and with the carry, zero and parity flags (the compares)
+# MEM4 and MEM8 are a 4-byte and an 8-byte source in memory.
 # xmm0 is the destination and xmm1 the source; MEM stands for the source in memory.
 TESTS = """
+comiss xmm0, xmm1 : c
+ucomiss xmm0, xmm1 : c
+comisd xmm0, xmm1 : c
+ucomisd xmm0, xmm1 : c
+comiss xmm0, MEM4 : c
+ucomisd xmm0, MEM8 : c
+minss xmm0, xmm1 : f
+maxss xmm0, xmm1 : f
+minsd xmm0, xmm1 : d
+maxsd xmm0, xmm1 : d
+minss xmm0, MEM4 : f
+maxss xmm0, MEM4 : f
+sqrtss xmm0, xmm1 : f
+sqrtsd xmm0, xmm1 : d
+cmpless xmm0, xmm1 : i
+movss xmm0, xmm1 : i
+movss xmm0, MEM4 : i
+movsd xmm0, xmm1 : i
+movsd xmm0, MEM8 : i
+movaps xmm0, xmm1 : i
+movups xmm0, MEM : i
+movlps xmm0, MEM8 : i
+movhps xmm0, MEM8 : i
+movlpd xmm0, MEM8 : i
+movhpd xmm0, MEM8 : i
+movd xmm0, eax : i
+movd eax, xmm1 : i
+movq xmm0, xmm1 : i
+movq xmm0, MEM8 : i
+movdqa xmm0, xmm1 : i
+movdqu xmm0, MEM : i
+andps xmm0, xmm1 : i
+andnps xmm0, xmm1 : i
+orps xmm0, xmm1 : i
+xorps xmm0, xmm1 : i
+andpd xmm0, xmm1 : i
+andnpd xmm0, xmm1 : i
+orpd xmm0, xmm1 : i
+xorpd xmm0, xmm1 : i
+pand xmm0, xmm1 : i
+por xmm0, xmm1 : i
+pxor xmm0, xmm1 : i
+cvtss2sd xmm0, xmm1 : d
+cvtsd2ss xmm0, xmm1 : f
+cvtsi2ss xmm0, eax : f
+cvtsi2sd xmm0, eax : d
+cvtss2si eax, xmm1 : i
+cvttss2si eax, xmm1 : i
+cvtsd2si eax, xmm1 : i
+cvttsd2si eax, xmm1 : i
+cvttpd2dq xmm0, xmm1 : i
 pshufd xmm0, xmm1, 0x1b : i
 pshufd xmm0, xmm1, 0xe4 : i
 pshufd xmm0, xmm1, 0x4e : i
@@ -217,7 +270,7 @@ int main(int argc, char **argv) {
                 memcpy(s, &d, 8);
             }
             tests[t](a, s, eax);
-            if (kinds[t] != 'm') eax[2] = 0;
+            if (kinds[t] == 'm') eax[2] &= 3; else if (kinds[t] != 'c') eax[2] = 0;
             printf("%d %d ", t, it);
             for (int k = 0; k < 16; k++) printf("%02x", a[k]);
             printf(" %08x%08x%x\n", eax[0], eax[1], eax[2]);
@@ -248,7 +301,7 @@ def main():
     with open(path("i386.s"), "w") as f:
         f.write(".intel_syntax noprefix\n.text\n")
         for t, _ in sse:
-            f.write(t.replace("MEM8", "qword ptr [ecx]").replace("MEM", "xmmword ptr [ecx]") + "\n")
+            f.write(t.replace("MEM4", "dword ptr [ecx]").replace("MEM8", "qword ptr [ecx]").replace("MEM", "xmmword ptr [ecx]") + "\n")
     run(["clang", "-arch", "i386", "-c", path("i386.s"), "-o", path("i386.o")])
     obj = lief.parse(path("i386.o"))   # kept: a section does not keep its file alive
     code = bytes(next(s for s in obj.sections if s.name == "__text").content)
@@ -274,7 +327,7 @@ def main():
             f.write("static void t%d(uint8_t *a, uint8_t *s, uint32_t *eax) {\n    CPU cpu = {0}, *c = &cpu; M = s - 0x1000; C.ecx = 0x1000;\n"
                     "    uint32_t cf = 0, zf = 0, sf = 0, of = 0, pf = 0;\n"
                     "    memcpy(&C.xmm[0], a, 16); memcpy(&C.xmm[1], s, 16); C.eax = eax[0]; C.edx = eax[1];\n%s\n"
-                    "    memcpy(a, &C.xmm[0], 16); eax[0] = C.eax; eax[1] = C.edx; eax[2] = (cf != 0) | (of != 0) << 1;\n}\n" % (n, b))
+                    "    memcpy(a, &C.xmm[0], 16); eax[0] = C.eax; eax[1] = C.edx; eax[2] = (cf != 0) | (of != 0) << 1 | (zf != 0) << 2 | (pf != 0) << 3;\n}\n" % (n, b))
         nx = len(bodies)
         f.write("static void t%d(uint8_t *a, uint8_t *s, uint32_t *eax) { M = a - 0x1000; double v = rdt(0x1000); memset(a, 0, 16); memcpy(a, &v, 8); }\n" % nx)
         f.write("static void t%d(uint8_t *a, uint8_t *s, uint32_t *eax) { double v; memcpy(&v, s, 8); M = a - 0x1000; memset(a, 0, 16); wrt(0x1000, v); }\n" % (nx + 1))
@@ -287,9 +340,9 @@ def main():
         f.write(".intel_syntax noprefix\n.text\n")
         for n, (t, _) in enumerate(sse):
             f.write(".globl _r%d\n_r%d:\n mov r8, rdx\n movdqu xmm0, [rdi]\n movdqu xmm1, [rsi]\n mov eax, [r8]\n mov edx, [r8 + 4]\n %s\n"
-                    " setc r9b\n seto r10b\n movdqu [rdi], xmm0\n mov [r8], eax\n mov [r8 + 4], edx\n movzx r9d, r9b\n movzx r10d, r10b\n"
-                    " lea r9d, [r9 + r10*2]\n mov [r8 + 8], r9d\n ret\n"
-                    % (n, n, t.replace("MEM8", "qword ptr [rsi]").replace("MEM", "xmmword ptr [rsi]")))
+                    " setc r9b\n seto r10b\n setz r11b\n setp cl\n movdqu [rdi], xmm0\n mov [r8], eax\n mov [r8 + 4], edx\n movzx r9d, r9b\n movzx r10d, r10b\n"
+                    " lea r9d, [r9 + r10*2]\n movzx r11d, r11b\n movzx ecx, cl\n lea r9d, [r9 + r11*4]\n lea r9d, [r9 + rcx*8]\n mov [r8 + 8], r9d\n ret\n"
+                    % (n, n, t.replace("MEM4", "dword ptr [rsi]").replace("MEM8", "qword ptr [rsi]").replace("MEM", "xmmword ptr [rsi]")))
         f.write(".globl _r%d\n_r%d:\n fld tbyte ptr [rdi]\n pxor xmm0, xmm0\n movdqu [rdi], xmm0\n fstp qword ptr [rdi]\n ret\n" % (nx, nx))
         f.write(".globl _r%d\n_r%d:\n fld qword ptr [rsi]\n pxor xmm0, xmm0\n movdqu [rdi], xmm0\n fstp tbyte ptr [rdi]\n ret\n" % (nx + 1, nx + 1))
     with open(path("real.c"), "w") as f:
@@ -310,7 +363,7 @@ def main():
         ha, hb = bytes.fromhex(a.split()[2]), bytes.fromhex(b.split()[2])
         if a.split()[3] != b.split()[3]: return False
         fmt, n = ("<d", 8) if kind in ("d", "x") else ("<f", 4)
-        if kind in ("i", "m"): return False
+        if kind in ("i", "m", "c"): return False
         for k in range(0, 16, n):
             x, y = struct.unpack_from(fmt, ha, k)[0], struct.unpack_from(fmt, hb, k)[0]
             if ha[k:k + n] == hb[k:k + n] or (x != x and y != y): continue
